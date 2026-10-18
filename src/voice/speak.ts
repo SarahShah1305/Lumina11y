@@ -1,5 +1,5 @@
 import * as Speech from 'expo-speech';
-import { AccessibilityInfo } from 'react-native';
+import { AccessibilityInfo, Platform } from 'react-native';
 
 export type SpeakOptions = {
   rate?: number;
@@ -77,6 +77,10 @@ function beginSpeech(item: QueuedSpeech, activeGeneration: number): void {
   speaking = true;
   activeItem = item;
   activeItemId = itemId;
+  if (Platform.OS === 'web') {
+    speakWithDevice(item, activeGeneration, itemId);
+    return;
+  }
   void AccessibilityInfo.isScreenReaderEnabled()
     .then((screenReaderEnabled) => {
       if (activeGeneration !== generation || itemId !== activeItemId) return;
