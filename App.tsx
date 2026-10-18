@@ -3,6 +3,7 @@ import React, { useEffect, useState } from 'react';
 import {
   AccessibilityInfo,
   Pressable,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -15,6 +16,7 @@ import type { Session } from '@supabase/supabase-js';
 import { DEFAULT_SETTINGS, SPEECH_RATES, TEXT_SCALES, type ColorTheme, type UserSettings } from './src/types';
 import { loadUserSettings, readLocalSettings, saveUserSettings } from './src/lib/preferences';
 import { isSupabaseConfigured, supabase } from './src/lib/supabase';
+import { useVoice, VoiceDemoScreen, VoiceProvider } from './src/voice';
 
 type Screen = 'welcome' | 'tutorial' | 'auth' | 'home' | 'settings';
 type AuthMode = 'sign-in' | 'sign-up';
@@ -84,7 +86,7 @@ function ActionButton({
   );
 }
 
-export default function App() {
+function AppContent() {
   const [screen, setScreen] = useState<Screen>('welcome');
   const [authMode, setAuthMode] = useState<AuthMode>('sign-in');
   const [tutorialIndex, setTutorialIndex] = useState(0);
@@ -96,10 +98,15 @@ export default function App() {
   const [sessionReady, setSessionReady] = useState(!isSupabaseConfigured);
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [settingsMessage, setSettingsMessage] = useState('');
+  const { setSpeechRate: setVoiceSpeechRate } = useVoice();
   const palette = paletteFor(settings.colorTheme);
   const scale = settings.textScale;
   const s = makeStyles(palette, scale);
   const announce = (message: string) => AccessibilityInfo.announceForAccessibility(message);
+
+  useEffect(() => {
+    setVoiceSpeechRate(settings.speechRate);
+  }, [settings.speechRate, setVoiceSpeechRate]);
 
   useEffect(() => {
     if (!supabase) return;
@@ -370,6 +377,20 @@ export default function App() {
   );
 }
 
+export default function App() {
+  const showVoiceDemo =
+    __DEV__ &&
+    Platform.OS === 'web' &&
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('voiceDemo') === '1';
+
+  return (
+    <VoiceProvider>
+      {showVoiceDemo ? <VoiceDemoScreen /> : <AppContent />}
+    </VoiceProvider>
+  );
+}
+
 function makeStyles(palette: ReturnType<typeof paletteFor>, scale: number) {
   return StyleSheet.create({
     scrollContent: { flexGrow: 1, justifyContent: 'center', padding: 24 },
@@ -399,4 +420,3 @@ const buttonStyles = StyleSheet.create({
     marginTop: 4,
   },
 });
-
