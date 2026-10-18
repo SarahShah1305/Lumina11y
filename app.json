@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "Lumina11y",
+    "slug": "lumina11y",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "backgroundColor": "#102a43"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#102a43"
+      }
+    }
+  }
+}
