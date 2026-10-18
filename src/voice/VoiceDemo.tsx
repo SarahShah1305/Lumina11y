@@ -1,18 +1,23 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { VoiceButton } from './VoiceButton';
 import { useVoice } from './VoiceContext';
 
 export function VoiceDemoScreen() {
   const { lastHeard, registerCommand, registerShortcut, speak } = useVoice();
+  const [demoStatus, setDemoStatus] = useState('No demo action yet.');
 
   useEffect(() => {
     const unregisterCommand = registerCommand(
       ['demo greeting', 'say hello'],
-      () => speak('Hello. Voice commands are working.'),
+      () => {
+        setDemoStatus('The demo greeting voice command matched.');
+        speak('Hello. Voice commands are working.');
+      },
       'Test command matching',
     );
     const unregisterShortcut = registerShortcut('Alt+G', 'Speak the voice demo greeting', () => {
+      setDemoStatus('The Alt+G keyboard shortcut fired.');
       speak('Hello from the keyboard shortcut.');
     });
     return () => {
@@ -31,11 +36,15 @@ export function VoiceDemoScreen() {
       <Pressable
         accessibilityLabel="Test speech output"
         accessibilityRole="button"
-        onPress={() => speak('Speech output is working.')}
+        onPress={() => {
+          setDemoStatus('Speech output was requested.');
+          speak('Speech output is working.');
+        }}
         style={styles.action}
       >
         <Text style={styles.actionText}>Test speech output</Text>
       </Pressable>
+      <Text accessibilityLiveRegion="polite" style={styles.result}>{demoStatus}</Text>
       <Text accessibilityLiveRegion="polite" style={styles.result}>
         {lastHeard ? `Last heard: ${lastHeard}` : 'No speech recognized yet.'}
       </Text>
