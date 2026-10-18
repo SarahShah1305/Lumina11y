@@ -58,10 +58,9 @@ useEffect(() => registerShortcut('Alt+N', 'Open notes', () => navigate('Notes'))
 ```
 
 The help command reads all currently registered voice commands and keyboard
-shortcuts. Defaults are Alt+H for help, Alt+T for photo text, Alt+E for
-emergency help, Alt+R for guided typing, and Alt+N for notes. Until the relevant
-feature registers a handler, the reserved shortcuts explain that they are not
-connected yet.
+shortcuts. Defaults are Alt+H for help, Alt+E for emergency help, Alt+R for
+guided typing, and Alt+N for notes. Until the relevant feature registers a
+handler, the reserved shortcuts explain that they are not connected yet.
 
 ## Listening and demo
 

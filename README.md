@@ -1,16 +1,16 @@
 # Lumina11y
 
-Lumina11y is an accessibility-focused Expo app for blind and low-vision users. Person 1's foundation includes the welcome flow, a step-by-step tutorial, Supabase account access, and saved accessibility preferences.
+Lumina11y is an accessibility-focused Expo app for blind and low-vision users. The app includes an accessible welcome flow, Supabase account access, saved accessibility preferences, and a voice module.
 
 ## What works in this milestone
 
-- Welcome and tutorial screens, with accessible headings, button names, and spoken step announcements.
+- An accessible welcome screen with spoken welcome and voice options.
 - Email/password account creation, sign-in, persistent sessions, and sign-out through Supabase Auth.
 - An accessibility settings page for text size, colour theme, and preferred speech speed.
 - Settings cached on the phone and synced to that signed-in user's Supabase row.
 - Row Level Security policies so authenticated users can only read or change their own settings.
 
-The voice speed is saved as a preference for Person 2's voice work to use. Voice playback itself is not connected yet. Notes, reminders, photo descriptions, and emergency contacts remain later work.
+The voice module uses the saved voice-speed preference. Notes, reminders, photo descriptions, and emergency contacts remain later work.
 
 ## Connect the Supabase backend
 
@@ -56,4 +56,4 @@ The settings columns are `text_scale`, `color_theme`, and `speech_rate`. Voice i
 - Database table and owner-only policies: `supabase/migrations/20261018000000_user_settings.sql`.
 - App screens and flow: `App.tsx`.
 
-Person 2 can connect voice playback to `settings.speechRate` in `App.tsx`/`src/types.ts`. Keep the existing per-user setting and its database column as the single source of truth.
+Person 2's voice module is in `src/voice/`; it reads the existing `settings.speechRate` preference. Keep the existing per-user setting and its database column as the single source of truth.

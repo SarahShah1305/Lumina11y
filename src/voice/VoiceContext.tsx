@@ -22,6 +22,8 @@ type VoiceContextValue = {
   stopSpeaking: () => void;
   startListening: () => Promise<void>;
   stopListening: () => void;
+  repeatLastResponse: () => void;
+  readHelp: () => void;
   registerCommand: (phrases: string | string[], handler: CommandHandler, description?: string) => () => void;
   registerShortcut: (keyCombo: string, label: string, handler: () => void | Promise<void>) => () => void;
   setSpeechRate: (rate: number) => void;
@@ -57,13 +59,17 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
     stopSpeech();
   }, []);
 
+  const repeatLastResponse = useCallback(() => {
+    if (lastResponse.current) speak(lastResponse.current);
+    else speak('There is no response to repeat yet.');
+  }, [speak]);
+
   const setSpeechRate = useCallback((rate: number) => {
     setDefaultSpeechRate(rate);
     setSpeechRateState(rate);
   }, []);
 
   const readHelp = useCallback(() => {
-    const rate = Math.min(getDefaultSpeechRate(), 0.85);
     const commands = getVoiceCommands();
     const currentShortcuts = getVoiceShortcuts();
     const lines = [
@@ -73,7 +79,7 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
       ...currentShortcuts.map((shortcut) => `${shortcut.keyCombo}. ${shortcut.label}.`),
     ];
     stopSpeech();
-    lines.forEach((line, index) => speak(line, { rate, queue: index > 0 }));
+    lines.forEach((line, index) => speak(line, { queue: index > 0 }));
   }, [speak]);
 
   const startListening = useCallback(async () => {
@@ -117,8 +123,7 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
         else speak('Go back is not connected on this screen.');
       }, 'Go back to the previous page'),
       registerCommand('repeat', () => {
-        if (lastResponse.current) speak(lastResponse.current);
-        else speak('There is no response to repeat yet.');
+        repeatLastResponse();
       }, 'Repeat the last response'),
       registerCommand('help', readHelp, 'Hear the available voice commands and shortcuts'),
       registerCommand('stop', () => {
@@ -141,7 +146,7 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
       }, 'Sign out of your account'),
     ];
     return () => unregister.forEach((remove) => remove());
-  }, [readHelp, setSpeechRate, speak]);
+  }, [readHelp, repeatLastResponse, setSpeechRate, speak]);
 
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return;
@@ -180,6 +185,8 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
     stopSpeaking,
     startListening,
     stopListening,
+    repeatLastResponse,
+    readHelp,
     registerCommand,
     registerShortcut,
     setSpeechRate,

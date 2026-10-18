@@ -8,7 +8,6 @@ export type VoiceShortcut = {
 
 const defaults: VoiceShortcut[] = [
   { keyCombo: 'Alt+H', label: 'Hear voice commands and keyboard shortcuts' },
-  { keyCombo: 'Alt+T', label: 'Read text from a photo' },
   { keyCombo: 'Alt+E', label: 'Emergency help' },
   { keyCombo: 'Alt+R', label: 'Start or read back guided typing' },
   { keyCombo: 'Alt+N', label: 'Open notes' },

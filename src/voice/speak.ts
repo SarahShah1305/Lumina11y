@@ -1,5 +1,6 @@
 import * as Speech from 'expo-speech';
 import { AccessibilityInfo, Platform } from 'react-native';
+import { APP_NAME, APP_SPOKEN_NAME } from './constants';
 
 export type SpeakOptions = {
   rate?: number;
@@ -117,7 +118,7 @@ function cancelActiveSpeech(): void {
 }
 
 export function speak(text: string, options: SpeakOptions = {}): void {
-  const cleanedText = text.trim();
+  const cleanedText = text.trim().replaceAll(APP_NAME, APP_SPOKEN_NAME);
   if (!cleanedText) return;
 
   const item = { text: cleanedText, options };

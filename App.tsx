@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   Pressable,
@@ -16,9 +16,9 @@ import type { Session } from '@supabase/supabase-js';
 import { DEFAULT_SETTINGS, SPEECH_RATES, TEXT_SCALES, type ColorTheme, type UserSettings } from './src/types';
 import { loadUserSettings, readLocalSettings, saveUserSettings } from './src/lib/preferences';
 import { isSupabaseConfigured, supabase } from './src/lib/supabase';
-import { useVoice, VoiceDemoScreen, VoiceProvider } from './src/voice';
+import { APP_NAME, APP_WELCOME_SPEECH, useVoice, VoiceButton, VoiceDemoScreen, VoiceProvider } from './src/voice';
 
-type Screen = 'welcome' | 'tutorial' | 'auth' | 'home' | 'settings';
+type Screen = 'welcome' | 'auth' | 'home' | 'settings';
 type AuthMode = 'sign-in' | 'sign-up';
 
 const paletteFor = (theme: ColorTheme) => {
@@ -30,21 +30,6 @@ const paletteFor = (theme: ColorTheme) => {
   }
   return { background: '#eaf2f7', card: '#ffffff', text: '#142d3a', muted: '#405966', accent: '#005b75', accentText: '#ffffff', border: '#526e7c', input: '#ffffff', error: '#a1261d' };
 };
-
-const tutorialPages = [
-  {
-    title: 'Use your screen reader',
-    body: 'Lumina11y labels its buttons and fields for assistive technology. On iPhone, turn on VoiceOver in Settings, then swipe right to move through controls and double-tap to activate one. On Android, use TalkBack in Accessibility settings.',
-  },
-  {
-    title: 'Make the display comfortable',
-    body: 'After you create an account, open Settings to choose larger text and a light, dark, or high-contrast colour theme. Your choices are saved to your account and restored when you sign in again.',
-  },
-  {
-    title: 'Set your preferred voice speed',
-    body: 'Choose a speech speed in Settings. The preference is saved now so the voice features can use it when they are added. Voice playback is not connected yet.',
-  },
-];
 
 function AppText({ scale, color, style, ...props }: TextProps & { scale: number; color: string }) {
   return <Text {...props} style={[{ color, fontSize: 18 * scale, lineHeight: 27 * scale }, style]} />;
@@ -70,6 +55,7 @@ function ActionButton({
   return (
     <Pressable
       accessibilityRole={selected === undefined ? 'button' : 'radio'}
+      accessibilityLabel={label}
       accessibilityState={{ disabled, ...(selected === undefined ? {} : { checked: selected }) }}
       disabled={disabled}
       onPress={onPress}
@@ -86,27 +72,112 @@ function ActionButton({
   );
 }
 
+function VoiceOptions({
+  scale,
+  palette,
+  onSettings,
+  onSignIn,
+  includeSignIn = false,
+}: {
+  scale: number;
+  palette: ReturnType<typeof paletteFor>;
+  onSettings: () => void;
+  onSignIn?: () => void;
+  includeSignIn?: boolean;
+}) {
+  const { readHelp, repeatLastResponse, speak, stopSpeaking } = useVoice();
+
+  return (
+    <View style={sForVoiceOptions.section}>
+      <AppText accessibilityRole="header" scale={scale} color={palette.text} style={sForVoiceOptions.heading}>Voice options</AppText>
+      <ActionButton label="Voice help" onPress={readHelp} scale={scale} palette={palette} secondary />
+      <ActionButton label="Accessibility settings" onPress={onSettings} scale={scale} palette={palette} secondary />
+      <ActionButton label="Repeat" onPress={repeatLastResponse} scale={scale} palette={palette} secondary />
+      <ActionButton label="Stop" onPress={() => { stopSpeaking(); speak('Stopped.'); }} scale={scale} palette={palette} secondary />
+      {Platform.OS === 'web' && <VoiceButton />}
+      {includeSignIn && onSignIn && (
+        <ActionButton label="Sign in" onPress={onSignIn} scale={scale} palette={palette} />
+      )}
+    </View>
+  );
+}
+
+const sForVoiceOptions = StyleSheet.create({
+  section: { gap: 8, marginTop: 12 },
+  heading: { fontSize: 23, lineHeight: 31, fontWeight: '800', marginBottom: 4 },
+});
+
 function AppContent() {
-  const [screen, setScreen] = useState<Screen>('welcome');
+  const [screen, setScreen] = useState<Screen>('auth');
   const [authMode, setAuthMode] = useState<AuthMode>('sign-in');
-  const [tutorialIndex, setTutorialIndex] = useState(0);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authMessage, setAuthMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [sessionReady, setSessionReady] = useState(!isSupabaseConfigured);
+  const [settingsReady, setSettingsReady] = useState(!isSupabaseConfigured);
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [settingsMessage, setSettingsMessage] = useState('');
-  const { setSpeechRate: setVoiceSpeechRate } = useVoice();
+  const [webWelcomeStarted, setWebWelcomeStarted] = useState(false);
+  const [pendingSignInMessage, setPendingSignInMessage] = useState(false);
+  const { readHelp, registerCommand, setSpeechRate: setVoiceSpeechRate, speak } = useVoice();
+  const welcomeSpoken = useRef(false);
   const palette = paletteFor(settings.colorTheme);
   const scale = settings.textScale;
   const s = makeStyles(palette, scale);
   const announce = (message: string) => AccessibilityInfo.announceForAccessibility(message);
+  const signOut = useCallback(async () => {
+    if (!supabase) return;
+    setBusy(true);
+    const { error } = await supabase.auth.signOut();
+    setBusy(false);
+    if (error) {
+      setAuthMessage(`Could not sign out: ${error.message}`);
+      return;
+    }
+    setScreen('welcome');
+    speak(`Signed out of ${APP_NAME}.`);
+  }, [speak]);
 
   useEffect(() => {
     setVoiceSpeechRate(settings.speechRate);
   }, [settings.speechRate, setVoiceSpeechRate]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web' || !sessionReady || !settingsReady || welcomeSpoken.current) return;
+    welcomeSpoken.current = true;
+    speak(APP_WELCOME_SPEECH);
+  }, [sessionReady, settingsReady, speak]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || !webWelcomeStarted || !settingsReady || welcomeSpoken.current) return;
+    welcomeSpoken.current = true;
+    speak(APP_WELCOME_SPEECH);
+  }, [settingsReady, speak, webWelcomeStarted]);
+
+  useEffect(() => {
+    if (!pendingSignInMessage || !session || !settingsReady) return;
+    setPendingSignInMessage(false);
+    speak('Signed in. You are on the home screen.');
+  }, [pendingSignInMessage, session, settingsReady, speak]);
+
+  useEffect(() => {
+    const unregister = [
+      registerCommand('voice help', readHelp, 'Hear voice commands and keyboard shortcuts'),
+      registerCommand(['accessibility settings', 'open settings'], () => {
+        speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
+        setScreen('settings');
+      }, 'Open accessibility settings'),
+      registerCommand('sign out', signOut, 'Sign out of your account'),
+      registerCommand('sign in', () => {
+        speak('Opening sign in.');
+        setAuthMessage('');
+        setScreen('auth');
+      }, 'Open the sign-in screen'),
+    ];
+    return () => unregister.forEach((remove) => remove());
+  }, [readHelp, registerCommand, signOut, speak]);
 
   useEffect(() => {
     if (!supabase) return;
@@ -116,26 +187,35 @@ function AppContent() {
       setSessionReady(true);
       if (nextSession) {
         setScreen('home');
+        setSettingsReady(false);
         setSettingsMessage('Loading your saved settings…');
         // Defer database work until Supabase has finished its auth event callback.
         setTimeout(() => { void syncSettings(nextSession); }, 0);
       } else {
         setSettings(DEFAULT_SETTINGS);
+        setVoiceSpeechRate(DEFAULT_SETTINGS.speechRate);
+        setSettingsReady(true);
         setSettingsMessage('');
-        setScreen('welcome');
+        setScreen('auth');
       }
     });
 
     void supabase.auth.getSession().then(({ data, error }) => {
-      setSessionReady(true);
       if (error) {
         setAuthMessage(`Could not restore your sign-in: ${error.message}`);
+        setSessionReady(true);
+        setSettingsReady(true);
         return;
       }
       setSession(data.session);
       if (data.session) {
         setScreen('home');
-        void syncSettings(data.session);
+        setSettingsReady(false);
+        void syncSettings(data.session).finally(() => setSessionReady(true));
+      } else {
+        setScreen('auth');
+        setSettingsReady(true);
+        setSessionReady(true);
       }
     });
 
@@ -146,9 +226,12 @@ function AppContent() {
     const userId = activeSession.user.id;
     const cached = await readLocalSettings(userId);
     setSettings(cached);
+    setVoiceSpeechRate(cached.speechRate);
+    setSettingsReady(true);
     try {
       const saved = await loadUserSettings(activeSession.user);
       setSettings(saved);
+      setVoiceSpeechRate(saved.speechRate);
       setSettingsMessage('Your settings are loaded from your account.');
     } catch {
       setSettingsMessage('Could not reach the settings table. Local settings are shown; check the Supabase setup steps.');
@@ -175,14 +258,14 @@ function AppContent() {
         if (error) throw error;
         if (!data.session) {
           setAuthMessage('Account created. Check your email to confirm the account, then come back and sign in.');
-          announce('Account created. Check your email to confirm the account.');
+          speak('Account created. Check your email to confirm the account.');
         } else {
-          announce('Account created. Loading your Lumina11y settings.');
+          speak(`Account created. Loading your ${APP_NAME} settings.`);
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
         if (error) throw error;
-        announce('Signed in. Loading your Lumina11y settings.');
+        setPendingSignInMessage(true);
       }
     } catch (error) {
       const nextMessage = error instanceof Error ? error.message : 'We could not complete that request. Try again.';
@@ -207,37 +290,37 @@ function AppContent() {
     }
   }
 
-  async function signOut() {
-    if (!supabase) return;
-    setBusy(true);
-    const { error } = await supabase.auth.signOut();
-    setBusy(false);
-    if (error) {
-      setAuthMessage(`Could not sign out: ${error.message}`);
-      return;
-    }
-    setScreen('welcome');
-    announce('Signed out of Lumina11y.');
-  }
-
-  function startTutorial() {
-    setTutorialIndex(0);
-    setScreen('tutorial');
-    announce(`Tutorial. ${tutorialPages[0].title}. ${tutorialPages[0].body}`);
+  function startWebWelcome() {
+    if (webWelcomeStarted) return;
+    setWebWelcomeStarted(true);
   }
 
   const frame = (children: React.ReactNode, footer?: string) => (
     <SafeAreaProvider>
       <SafeAreaView style={{ flex: 1, backgroundColor: palette.background }}>
         <StatusBar style={settings.colorTheme === 'light' ? 'dark' : 'light'} />
-        <ScrollView contentContainerStyle={s.scrollContent} keyboardShouldPersistTaps="handled">
-          <View style={s.header}>
-            <Text style={s.brand}>Lumina11y</Text>
-            <AppText scale={scale} color={palette.muted}>A more accessible way to get things done</AppText>
-          </View>
-          <View style={s.card}>{children}</View>
-          {!!footer && <AppText scale={scale} color={palette.muted} style={s.footer}>{footer}</AppText>}
-        </ScrollView>
+        {Platform.OS === 'web' && !webWelcomeStarted ? (
+          <Pressable
+            accessibilityLabel={`Welcome to ${APP_NAME}. Press Enter or tap anywhere to start.`}
+            accessibilityRole="button"
+            focusable
+            onPress={startWebWelcome}
+            style={s.webWelcomeGate}
+          >
+            <Text style={s.webWelcomeText}>
+              Welcome to {APP_NAME}. Press Enter or tap anywhere to start.
+            </Text>
+          </Pressable>
+        ) : (
+          <ScrollView contentContainerStyle={s.scrollContent} keyboardShouldPersistTaps="handled">
+            <View style={s.header}>
+              <Text style={s.brand}>{APP_NAME}</Text>
+              <AppText scale={scale} color={palette.muted}>A more accessible way to get things done</AppText>
+            </View>
+            <View style={s.card}>{children}</View>
+            {!!footer && <AppText scale={scale} color={palette.muted} style={s.footer}>{footer}</AppText>}
+          </ScrollView>
+        )}
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -249,37 +332,22 @@ function AppContent() {
   if (screen === 'welcome') {
     return frame(
       <>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Welcome to Lumina11y</AppText>
+        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Welcome to {APP_NAME}</AppText>
         <AppText scale={scale} color={palette.text} style={s.body}>
           Designed for blind and low-vision people, with clear steps and controls that work with assistive technology.
         </AppText>
-        <ActionButton label="Start the tutorial" onPress={startTutorial} scale={scale} palette={palette} />
-        <ActionButton label="Sign in or create an account" onPress={() => { setAuthMessage(''); setScreen('auth'); }} scale={scale} palette={palette} secondary />
+        <VoiceOptions
+          scale={scale}
+          palette={palette}
+          onSettings={() => {
+            speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
+            setScreen('settings');
+          }}
+          onSignIn={() => { setAuthMessage(''); setScreen('auth'); }}
+          includeSignIn
+        />
       </>,
-      'Person 1 · accessible welcome, tutorial, accounts, and personal settings',
-    );
-  }
-
-  if (screen === 'tutorial') {
-    const page = tutorialPages[tutorialIndex];
-    const finish = () => {
-      if (session) setScreen('home');
-      else setScreen('auth');
-      announce(session ? 'Tutorial complete. Welcome to Lumina11y.' : 'Tutorial complete. Sign in or create an account to continue.');
-    };
-    return frame(
-      <>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Lumina11y tutorial</AppText>
-        <AppText scale={scale} color={palette.muted} style={s.hint}>Step {tutorialIndex + 1} of {tutorialPages.length}</AppText>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.sectionTitle}>{page.title}</AppText>
-        <AppText scale={scale} color={palette.text} style={s.body}>{page.body}</AppText>
-        {tutorialIndex > 0 && <ActionButton label="Previous step" onPress={() => { setTutorialIndex(tutorialIndex - 1); announce(`Step ${tutorialIndex}. ${tutorialPages[tutorialIndex - 1].title}`); }} scale={scale} palette={palette} secondary />}
-        {tutorialIndex < tutorialPages.length - 1
-          ? <ActionButton label="Next step" onPress={() => { setTutorialIndex(tutorialIndex + 1); announce(`Step ${tutorialIndex + 2}. ${tutorialPages[tutorialIndex + 1].title}. ${tutorialPages[tutorialIndex + 1].body}`); }} scale={scale} palette={palette} />
-          : <ActionButton label={session ? 'Finish tutorial' : 'Finish and continue'} onPress={finish} scale={scale} palette={palette} />}
-        <ActionButton label="Skip tutorial" onPress={finish} scale={scale} palette={palette} secondary />
-      </>,
-      'You can review this tutorial any time from the home screen.',
+      'Accessible welcome, accounts, and personal settings',
     );
   }
 
@@ -288,8 +356,16 @@ function AppContent() {
       <>
         <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>{authMode === 'sign-in' ? 'Sign in' : 'Create your account'}</AppText>
         <AppText scale={scale} color={palette.text} style={s.body}>
-          Your account is managed by Supabase. Lumina11y never reads your password aloud.
+          Your account is managed by Supabase. {APP_NAME} never reads your password aloud.
         </AppText>
+        <VoiceOptions
+          scale={scale}
+          palette={palette}
+          onSettings={() => {
+            speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
+            setScreen('settings');
+          }}
+        />
         <AppText scale={scale} color={palette.text} style={s.label}>Email address</AppText>
         <TextInput
           accessibilityLabel="Email address"
@@ -332,7 +408,7 @@ function AppContent() {
     return frame(
       <>
         <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Accessibility settings</AppText>
-        <AppText scale={scale} color={palette.text} style={s.body}>These preferences are saved to your Lumina11y account and restored when you sign in.</AppText>
+        <AppText scale={scale} color={palette.text} style={s.body}>These preferences are saved to your {APP_NAME} account and restored when you sign in.</AppText>
         <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.sectionTitle}>Text size</AppText>
         <View accessibilityRole="radiogroup" style={s.optionGroup}>
           {TEXT_SCALES.map((value) => (
@@ -351,7 +427,7 @@ function AppContent() {
         </View>
         <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.sectionTitle}>Voice speed</AppText>
         <AppText scale={scale} color={palette.text} style={s.body}>
-          {settings.speechRate.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}× preferred speed. Voice playback will use this when that feature is connected.
+          {settings.speechRate.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}× preferred speed. Spoken messages use this speed.
         </AppText>
         <View accessibilityRole="radiogroup" style={s.optionGroup}>
           {SPEECH_RATES.map((value) => (
@@ -366,10 +442,16 @@ function AppContent() {
 
   return frame(
     <>
-      <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Welcome to Lumina11y</AppText>
+      <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Welcome to {APP_NAME}</AppText>
       <AppText scale={scale} color={palette.text} style={s.body}>Your account settings are ready. Voice tools, notes and reminders, photo descriptions, and emergency contacts can connect here in later project work.</AppText>
-      <ActionButton label="Accessibility settings" onPress={() => setScreen('settings')} scale={scale} palette={palette} />
-      <ActionButton label="Review tutorial" onPress={startTutorial} scale={scale} palette={palette} secondary />
+      <VoiceOptions
+        scale={scale}
+        palette={palette}
+        onSettings={() => {
+          speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
+          setScreen('settings');
+        }}
+      />
       {!!settingsMessage && <AppText accessibilityLiveRegion="polite" scale={scale} color={palette.muted} style={s.hint}>{settingsMessage}</AppText>}
       <ActionButton label={busy ? 'Signing out…' : 'Sign out'} onPress={() => { void signOut(); }} scale={scale} palette={palette} secondary disabled={busy} />
     </>,
@@ -406,6 +488,22 @@ function makeStyles(palette: ReturnType<typeof paletteFor>, scale: number) {
     hint: { marginTop: 6 },
     footer: { textAlign: 'center', marginTop: 20 },
     optionGroup: { gap: 6 },
+    webWelcomeGate: {
+      alignItems: 'center',
+      backgroundColor: '#000000',
+      borderColor: '#ffeb00',
+      borderWidth: 5,
+      flex: 1,
+      justifyContent: 'center',
+      padding: 32,
+    },
+    webWelcomeText: {
+      color: '#ffeb00',
+      fontSize: 30 * scale,
+      fontWeight: '800',
+      lineHeight: 42 * scale,
+      textAlign: 'center',
+    },
   });
 }
 
