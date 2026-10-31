@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
-import { findVoiceCommand, getVoiceCommands, registerCommand, type CommandHandler } from './commands';
+import { findVoiceCommand, getVoiceCommands, normalizeCommand, registerCommand, type CommandHandler } from './commands';
 import {
   isListening as getListeningState,
   startListening as startPlatformListening,
@@ -20,8 +20,11 @@ import {
 type VoiceContextValue = {
   speak: (text: string, options?: SpeakOptions) => void;
   stopSpeaking: () => void;
-  startListening: () => Promise<void>;
-  stopListening: () => void;
+  startListening: (
+    onResult?: (text: string) => void,
+    onError?: (error: ListeningError, details?: string) => void,
+  ) => Promise<void>;
+  stopListening: (announce?: boolean) => void;
   repeatLastResponse: () => void;
   readHelp: () => void;
   registerCommand: (phrases: string | string[], handler: CommandHandler, description?: string) => () => void;
@@ -51,7 +54,8 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
   actionHandlers.current = { onGoBack, onLogout };
 
   const speak = useCallback((text: string, options?: SpeakOptions) => {
-    if (text.trim()) lastResponse.current = text;
+    if (text.trim() && options?.rememberLastResponse !== false) lastResponse.current = text;
+    stopPlatformListening(false);
     speakText(text, options);
   }, []);
 
@@ -77,50 +81,64 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
       ...commands.map((command) => `${command.phrases.join(' or ')}. ${command.description}.`),
       'Keyboard shortcuts.',
       ...currentShortcuts.map((shortcut) => `${shortcut.keyCombo}. ${shortcut.label}.`),
+      'Arrow Right. Go to the next screen.',
+      'Arrow Left. Go back to the previous screen.',
     ];
     stopSpeech();
-    lines.forEach((line, index) => speak(line, { queue: index > 0 }));
+    const helpRate = Math.min(getDefaultSpeechRate(), 0.85);
+    lines.forEach((line, index) => speak(line, { queue: index > 0, rate: helpRate }));
   }, [speak]);
 
-  const startListening = useCallback(async () => {
+  const startListening = useCallback(async (
+    onResult?: (text: string) => void,
+    onError?: (error: ListeningError, details?: string) => void,
+  ) => {
     await startPlatformListening(
       async (text) => {
+        stopPlatformListening(false);
+        console.log('[voice] Transcript received by voice context:', text || '[empty]');
         setLastHeard(text);
-        const match = findVoiceCommand(text);
-        if (!match) {
-          speak("Sorry, I didn't understand. Say help to hear all commands.");
+        if (onResult) {
+          onResult(text);
           return;
         }
-        try {
-          await match.command.handler(text, match.phrase);
-        } catch (error) {
+        const normalizedText = normalizeCommand(text);
+        const match = findVoiceCommand(normalizedText);
+        console.log(`[voice ${new Date().toISOString()}] Command mapped:`, match?.phrase ?? '[no match]');
+        if (!match) {
+          speak("I didn't hear anything. Say it again.");
+          return;
+        }
+        console.log(`[voice ${new Date().toISOString()}] Command executed:`, match.phrase);
+        void Promise.resolve(match.command.handler(normalizedText, match.phrase)).catch((error: unknown) => {
           console.error(`Voice command "${match.phrase}" failed.`, error);
           speak("I couldn't complete that command. Please try again.");
-        }
+        });
       },
-      (error: ListeningError) => {
-        if (error === 'unknown') {
-          console.error('Speech recognition returned an unknown error.');
-        }
-      },
+      onError,
     );
   }, [speak]);
 
-  const stopListening = useCallback(() => {
-    stopPlatformListening();
+  const stopListening = useCallback((announce = true) => {
+    stopPlatformListening(announce);
   }, []);
 
   useEffect(() => subscribeToListening(setListening), []);
   useEffect(() => subscribeToShortcuts(() => setShortcuts(getVoiceShortcuts())), []);
+  useEffect(() => () => stopPlatformListening(false), []);
   useEffect(() => {
     setDefaultSpeechRate(speechRate);
   }, [speechRate]);
 
   useEffect(() => {
     const unregister = [
-      registerCommand(['go back', 'back'], async () => {
+      registerCommand('go back', async () => {
         if (actionHandlers.current.onGoBack) await actionHandlers.current.onGoBack();
-        else speak('Go back is not connected on this screen.');
+        else {
+          const backCommand = findVoiceCommand('back');
+          if (backCommand) await backCommand.command.handler('back', backCommand.phrase);
+          else speak('Go back is not connected on this screen.');
+        }
       }, 'Go back to the previous page'),
       registerCommand('repeat', () => {
         repeatLastResponse();
@@ -142,7 +160,11 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
       }, 'Speed up the voice'),
       registerCommand('logout', async () => {
         if (actionHandlers.current.onLogout) await actionHandlers.current.onLogout();
-        else speak('Logout is ready to connect to your account handler.');
+        else {
+          const signOutCommand = findVoiceCommand('sign out');
+          if (signOutCommand) await signOutCommand.command.handler('sign out', signOutCommand.phrase);
+          else speak('Logout is ready to connect to your account handler.');
+        }
       }, 'Sign out of your account'),
     ];
     return () => unregister.forEach((remove) => remove());

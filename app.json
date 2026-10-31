@@ -9,7 +9,10 @@
       "backgroundColor": "#102a43"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Lumina needs the microphone to hear your voice commands."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -20,11 +23,11 @@
       "bundler": "metro"
     },
     "plugins": [
+      "expo-status-bar",
       [
-        "expo-speech-recognition",
+        "expo-audio",
         {
-          "microphonePermission": "Lumina11y uses your microphone to listen for voice commands.",
-          "speechRecognitionPermission": "Lumina11y uses speech recognition to understand voice commands."
+          "microphonePermission": "Lumina needs the microphone to hear your voice commands."
         }
       ]
     ]

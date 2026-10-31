@@ -7,6 +7,7 @@ export type SpeakOptions = {
   pitch?: number;
   language?: string;
   queue?: boolean;
+  rememberLastResponse?: boolean;
   onDone?: () => void;
   onStopped?: () => void;
 };
@@ -63,6 +64,7 @@ function speakWithDevice(item: QueuedSpeech, activeGeneration: number, itemId: n
       onDone: () => completeSpeech(activeGeneration, itemId),
       onStopped: () => completeSpeech(activeGeneration, itemId),
       onError: (error) => {
+        if (activeGeneration !== generation || itemId !== activeItemId) return;
         console.error('Text-to-speech failed.', error);
         completeSpeech(activeGeneration, itemId);
       },
@@ -87,7 +89,9 @@ function beginSpeech(item: QueuedSpeech, activeGeneration: number): void {
       if (activeGeneration !== generation || itemId !== activeItemId) return;
       if (screenReaderEnabled) {
         AccessibilityInfo.announceForAccessibility(item.text);
-        setTimeout(() => completeSpeech(activeGeneration, itemId), 700);
+        const words = item.text.split(/\s+/).length;
+        const estimatedDuration = Math.max(700, words * 360 / (item.options.rate ?? defaultRate));
+        setTimeout(() => completeSpeech(activeGeneration, itemId), estimatedDuration);
         return;
       }
       speakWithDevice(item, activeGeneration, itemId);
@@ -100,7 +104,7 @@ function beginSpeech(item: QueuedSpeech, activeGeneration: number): void {
     });
 }
 
-function cancelActiveSpeech(): void {
+function cancelActiveSpeech(stopDevice = true): void {
   const cancelledItem = activeItem;
   generation += 1;
   queue.length = 0;
@@ -112,9 +116,11 @@ function cancelActiveSpeech(): void {
   } catch (error) {
     console.error('Speech cancellation callback failed.', error);
   }
-  void Speech.stop().catch((error: unknown) => {
-    console.error('Could not stop speech.', error);
-  });
+  if (stopDevice) {
+    void Speech.stop().catch((error: unknown) => {
+      console.error('Could not stop speech.', error);
+    });
+  }
 }
 
 export function speak(text: string, options: SpeakOptions = {}): void {
@@ -137,4 +143,14 @@ export function speak(text: string, options: SpeakOptions = {}): void {
 
 export function stopSpeaking(): void {
   cancelActiveSpeech();
+}
+
+export async function stopSpeakingAndWait(): Promise<void> {
+  cancelActiveSpeech(false);
+  try {
+    await Speech.stop();
+  } catch (error) {
+    console.error('Could not stop speech before recording.', error);
+    throw error;
+  }
 }

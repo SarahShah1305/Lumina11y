@@ -1,7 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  AccessibilityInfo,
+  PanResponder,
   Pressable,
   Platform,
   ScrollView,
@@ -9,512 +9,1245 @@ import {
   Text,
   TextInput,
   View,
-  type TextProps,
+  type TextInput as TextInputType,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import type { Session } from '@supabase/supabase-js';
 import { DEFAULT_SETTINGS, SPEECH_RATES, TEXT_SCALES, type ColorTheme, type UserSettings } from './src/types';
 import { loadUserSettings, readLocalSettings, saveUserSettings } from './src/lib/preferences';
 import { isSupabaseConfigured, supabase } from './src/lib/supabase';
-import { APP_NAME, APP_WELCOME_SPEECH, useVoice, VoiceButton, VoiceDemoScreen, VoiceProvider } from './src/voice';
+import {
+  APP_NAME,
+  APP_WELCOME_SPEECH,
+  findVoiceCommand,
+  VoiceButton,
+  VoiceProvider,
+  useVoice,
+} from './src/voice';
 
-type Screen = 'welcome' | 'auth' | 'home' | 'settings';
+type Screen = 'welcome' | 'accessibility' | 'account' | 'email' | 'codeword' | 'confirm' | 'home';
 type AuthMode = 'sign-in' | 'sign-up';
+type SettingsStep = 'text-size' | 'color-theme' | 'voice-speed';
+type PromptHandler = (spokenText: string) => string | null;
 
-const paletteFor = (theme: ColorTheme) => {
+const settingSteps: SettingsStep[] = ['text-size', 'color-theme', 'voice-speed'];
+const registeredSystemPhrases = new Set([
+  'next', 'next page', 'back', 'previous page', 'yes', 'no', 'skip',
+  'help', 'repeat', 'stop', 'slower', 'faster', 'go back', 'logout',
+  'sign out', 'sign in', 'create account', 'try again',
+]);
+function paletteFor(theme: ColorTheme) {
   if (theme === 'high-contrast') {
-    return { background: '#000000', card: '#000000', text: '#ffffff', muted: '#ffffff', accent: '#ffeb00', accentText: '#000000', border: '#ffffff', input: '#000000', error: '#ff8a80' };
+    return {
+      background: '#000000', card: '#000000', text: '#ffffff', muted: '#ffffff',
+      accent: '#ffeb00', accentText: '#000000', border: '#ffffff', input: '#000000',
+    };
   }
   if (theme === 'dark') {
-    return { background: '#111820', card: '#1c2833', text: '#f5f8fa', muted: '#c8d4dc', accent: '#67d9f4', accentText: '#06131a', border: '#d1dce3', input: '#111820', error: '#ff9a91' };
+    return {
+      background: '#111820', card: '#1c2833', text: '#f5f8fa', muted: '#c8d4dc',
+      accent: '#67d9f4', accentText: '#06131a', border: '#d1dce3', input: '#111820',
+    };
   }
-  return { background: '#eaf2f7', card: '#ffffff', text: '#142d3a', muted: '#405966', accent: '#005b75', accentText: '#ffffff', border: '#526e7c', input: '#ffffff', error: '#a1261d' };
-};
-
-function AppText({ scale, color, style, ...props }: TextProps & { scale: number; color: string }) {
-  return <Text {...props} style={[{ color, fontSize: 18 * scale, lineHeight: 27 * scale }, style]} />;
+  return {
+    background: '#eaf2f7', card: '#ffffff', text: '#142d3a', muted: '#405966',
+    accent: '#005b75', accentText: '#ffffff', border: '#526e7c', input: '#ffffff',
+  };
 }
 
-function ActionButton({
+type Palette = ReturnType<typeof paletteFor>;
+
+function AppButton({
   label,
   onPress,
-  scale,
   palette,
+  scale,
   secondary = false,
+  compact = false,
+  selected = false,
   disabled = false,
-  selected,
 }: {
   label: string;
   onPress: () => void;
+  palette: Palette;
   scale: number;
-  palette: ReturnType<typeof paletteFor>;
   secondary?: boolean;
-  disabled?: boolean;
+  compact?: boolean;
   selected?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <Pressable
-      accessibilityRole={selected === undefined ? 'button' : 'radio'}
       accessibilityLabel={label}
-      accessibilityState={{ disabled, ...(selected === undefined ? {} : { checked: selected }) }}
+      accessibilityRole="button"
+      accessibilityState={{ disabled, selected }}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
-        buttonStyles.button,
-        { backgroundColor: secondary ? palette.card : palette.accent, borderColor: palette.accent, borderWidth: secondary ? 2 : 0, opacity: disabled ? 0.55 : pressed ? 0.78 : 1 },
+        styles.button,
+        compact && styles.compactButton,
+        {
+          backgroundColor: secondary ? palette.card : palette.accent,
+          borderColor: secondary ? palette.border : palette.accent,
+          borderWidth: secondary ? 2 : 0,
+          opacity: disabled ? 0.55 : pressed ? 0.78 : 1,
+        },
         selected && { borderWidth: 4 },
       ]}
     >
-      <Text style={{ color: secondary ? palette.text : palette.accentText, fontSize: 18 * scale, lineHeight: 25 * scale, fontWeight: '700', textAlign: 'center' }}>
+      <Text
+        style={{
+          color: secondary ? palette.text : palette.accentText,
+          fontSize: (compact ? 16 : 19) * scale,
+          lineHeight: (compact ? 22 : 26) * scale,
+          fontWeight: '800',
+          textAlign: 'center',
+        }}
+      >
         {label}{selected ? ', selected' : ''}
       </Text>
     </Pressable>
   );
 }
 
-function VoiceOptions({
-  scale,
-  palette,
-  onSettings,
-  onSignIn,
-  includeSignIn = false,
-}: {
-  scale: number;
-  palette: ReturnType<typeof paletteFor>;
-  onSettings: () => void;
-  onSignIn?: () => void;
-  includeSignIn?: boolean;
-}) {
-  const { readHelp, repeatLastResponse, speak, stopSpeaking } = useVoice();
-
-  return (
-    <View style={sForVoiceOptions.section}>
-      <AppText accessibilityRole="header" scale={scale} color={palette.text} style={sForVoiceOptions.heading}>Voice options</AppText>
-      <ActionButton label="Voice help" onPress={readHelp} scale={scale} palette={palette} secondary />
-      <ActionButton label="Accessibility settings" onPress={onSettings} scale={scale} palette={palette} secondary />
-      <ActionButton label="Repeat" onPress={repeatLastResponse} scale={scale} palette={palette} secondary />
-      <ActionButton label="Stop" onPress={() => { stopSpeaking(); speak('Stopped.'); }} scale={scale} palette={palette} secondary />
-      {Platform.OS === 'web' && <VoiceButton />}
-      {includeSignIn && onSignIn && (
-        <ActionButton label="Sign in" onPress={onSignIn} scale={scale} palette={palette} />
-      )}
-    </View>
-  );
-}
-
-const sForVoiceOptions = StyleSheet.create({
-  section: { gap: 8, marginTop: 12 },
-  heading: { fontSize: 23, lineHeight: 31, fontWeight: '800', marginBottom: 4 },
-});
-
 function AppContent() {
-  const [screen, setScreen] = useState<Screen>('auth');
+  const [screen, setScreen] = useState<Screen>('welcome');
   const [authMode, setAuthMode] = useState<AuthMode>('sign-in');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [authMessage, setAuthMessage] = useState('');
+  const [typedCodeword, setTypedCodeword] = useState('');
   const [busy, setBusy] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [sessionReady, setSessionReady] = useState(!isSupabaseConfigured);
   const [settingsReady, setSettingsReady] = useState(!isSupabaseConfigured);
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
-  const [settingsMessage, setSettingsMessage] = useState('');
-  const [webWelcomeStarted, setWebWelcomeStarted] = useState(false);
-  const [pendingSignInMessage, setPendingSignInMessage] = useState(false);
-  const { readHelp, registerCommand, setSpeechRate: setVoiceSpeechRate, speak } = useVoice();
-  const welcomeSpoken = useRef(false);
+  const [settingsStep, setSettingsStep] = useState<SettingsStep>('text-size');
+  const [settingsComplete, setSettingsComplete] = useState(false);
+  const [emailConfirming, setEmailConfirming] = useState(false);
+  const [codewordConfirming, setCodewordConfirming] = useState(false);
+  const [message, setMessage] = useState('');
+  const [heard, setHeard] = useState('');
+  const [welcomeText, setWelcomeText] = useState('');
+  const [webWelcomeStarted, setWebWelcomeStarted] = useState(Platform.OS !== 'web');
+  const { lastHeard, readHelp, registerCommand, registerShortcut, repeatLastResponse, setSpeechRate, speak, startListening, stopListening, stopSpeaking } = useVoice();
+
   const palette = paletteFor(settings.colorTheme);
   const scale = settings.textScale;
-  const s = makeStyles(palette, scale);
-  const announce = (message: string) => AccessibilityInfo.announceForAccessibility(message);
-  const signOut = useCallback(async () => {
-    if (!supabase) return;
-    setBusy(true);
-    const { error } = await supabase.auth.signOut();
-    setBusy(false);
-    if (error) {
-      setAuthMessage(`Could not sign out: ${error.message}`);
-      return;
-    }
-    setScreen('welcome');
-    speak(`Signed out of ${APP_NAME}.`);
-  }, [speak]);
+  const screenRef = useRef(screen);
+  const screenToken = useRef(0);
+  const enteredScreen = useRef<Screen | null>(null);
+  const webWelcomeStartedRef = useRef(webWelcomeStarted);
+  const sessionRef = useRef(session);
+  const settingsRef = useRef(settings);
+  const emailRef = useRef(email);
+  const typedCodewordRef = useRef(typedCodeword);
+  const codewordRef = useRef('');
+  const authModeRef = useRef(authMode);
+  const busyRef = useRef(false);
+  const sessionReadyRef = useRef(sessionReady);
+  const settingsReadyRef = useRef(settingsReady);
+  const settingsCompleteRef = useRef(settingsComplete);
+  const settingActionPending = useRef(false);
+  const settingsStepRef = useRef(settingsStep);
+  const authFeedback = useRef('');
+  const transitionUserId = useRef('');
+  const emailInputRef = useRef<TextInputType>(null);
+  const codewordInputRef = useRef<TextInputType>(null);
+  const answerYesRef = useRef<() => void>(() => undefined);
+  const answerNoRef = useRef<() => void>(() => undefined);
+  const retryAuthRef = useRef<() => void>(() => undefined);
+  const navigationRef = useRef<{ next: () => void; back: () => void; skip: () => void }>({
+    next: () => undefined,
+    back: () => undefined,
+    skip: () => undefined,
+  });
 
-  useEffect(() => {
-    setVoiceSpeechRate(settings.speechRate);
-  }, [settings.speechRate, setVoiceSpeechRate]);
+  screenRef.current = screen;
+  sessionRef.current = session;
+  settingsRef.current = settings;
+  emailRef.current = email;
+  typedCodewordRef.current = typedCodeword;
+  authModeRef.current = authMode;
+  busyRef.current = busy;
+  sessionReadyRef.current = sessionReady;
+  settingsReadyRef.current = settingsReady;
+  settingsCompleteRef.current = settingsComplete;
+  settingsStepRef.current = settingsStep;
+  webWelcomeStartedRef.current = webWelcomeStarted;
 
-  useEffect(() => {
-    if (Platform.OS === 'web' || !sessionReady || !settingsReady || welcomeSpoken.current) return;
-    welcomeSpoken.current = true;
-    speak(APP_WELCOME_SPEECH);
-  }, [sessionReady, settingsReady, speak]);
-
-  useEffect(() => {
-    if (Platform.OS !== 'web' || !webWelcomeStarted || !settingsReady || welcomeSpoken.current) return;
-    welcomeSpoken.current = true;
-    speak(APP_WELCOME_SPEECH);
-  }, [settingsReady, speak, webWelcomeStarted]);
-
-  useEffect(() => {
-    if (!pendingSignInMessage || !session || !settingsReady) return;
-    setPendingSignInMessage(false);
-    speak('Signed in. You are on the home screen.');
-  }, [pendingSignInMessage, session, settingsReady, speak]);
-
-  useEffect(() => {
-    const unregister = [
-      registerCommand('voice help', readHelp, 'Hear voice commands and keyboard shortcuts'),
-      registerCommand(['accessibility settings', 'open settings'], () => {
-        speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
-        setScreen('settings');
-      }, 'Open accessibility settings'),
-      registerCommand('sign out', signOut, 'Sign out of your account'),
-      registerCommand('sign in', () => {
-        speak('Opening sign in.');
-        setAuthMessage('');
-        setScreen('auth');
-      }, 'Open the sign-in screen'),
-    ];
-    return () => unregister.forEach((remove) => remove());
-  }, [readHelp, registerCommand, signOut, speak]);
-
-  useEffect(() => {
-    if (!supabase) return;
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, nextSession) => {
-      setSession(nextSession);
-      setSessionReady(true);
-      if (nextSession) {
-        setScreen('home');
-        setSettingsReady(false);
-        setSettingsMessage('Loading your saved settings…');
-        // Defer database work until Supabase has finished its auth event callback.
-        setTimeout(() => { void syncSettings(nextSession); }, 0);
-      } else {
-        setSettings(DEFAULT_SETTINGS);
-        setVoiceSpeechRate(DEFAULT_SETTINGS.speechRate);
-        setSettingsReady(true);
-        setSettingsMessage('');
-        setScreen('auth');
-      }
-    });
-
-    void supabase.auth.getSession().then(({ data, error }) => {
-      if (error) {
-        setAuthMessage(`Could not restore your sign-in: ${error.message}`);
-        setSessionReady(true);
-        setSettingsReady(true);
-        return;
-      }
-      setSession(data.session);
-      if (data.session) {
-        setScreen('home');
-        setSettingsReady(false);
-        void syncSettings(data.session).finally(() => setSessionReady(true));
-      } else {
-        setScreen('auth');
-        setSettingsReady(true);
-        setSessionReady(true);
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
+  function setActiveSettings(nextSettings: UserSettings) {
+    settingsRef.current = nextSettings;
+    setSettings(nextSettings);
+    setSpeechRate(nextSettings.speechRate);
+  }
 
   async function syncSettings(activeSession: Session) {
-    const userId = activeSession.user.id;
-    const cached = await readLocalSettings(userId);
-    setSettings(cached);
-    setVoiceSpeechRate(cached.speechRate);
-    setSettingsReady(true);
+    if (activeSession.user.email) {
+      emailRef.current = activeSession.user.email;
+      setEmail(activeSession.user.email);
+    }
+    const cached = await readLocalSettings(activeSession.user.id);
+    setActiveSettings(cached);
     try {
       const saved = await loadUserSettings(activeSession.user);
-      setSettings(saved);
-      setVoiceSpeechRate(saved.speechRate);
-      setSettingsMessage('Your settings are loaded from your account.');
-    } catch {
-      setSettingsMessage('Could not reach the settings table. Local settings are shown; check the Supabase setup steps.');
+      setActiveSettings(saved);
+    } catch (error) {
+      console.error('Could not load saved accessibility settings.', error);
+    } finally {
+      settingsReadyRef.current = true;
+      setSettingsReady(true);
     }
   }
 
+  function enterAuthenticatedSession(activeSession: Session) {
+    const userId = activeSession.user.id;
+    if (transitionUserId.current === userId) return;
+    transitionUserId.current = userId;
+    sessionRef.current = activeSession;
+    setSession(activeSession);
+    settingsReadyRef.current = false;
+    setSettingsReady(false);
+    setTimeout(() => {
+      void syncSettings(activeSession).then(() => {
+        if (sessionRef.current?.user.id === userId) setScreen('accessibility');
+      }).catch((error: unknown) => {
+        console.error('Could not prepare accessibility settings after sign-in.', error);
+        settingsReadyRef.current = true;
+        setSettingsReady(true);
+        setScreen('accessibility');
+      });
+    }, 0);
+  }
+
+  function resetSignedOutState() {
+    transitionUserId.current = '';
+    sessionRef.current = null;
+    setSession(null);
+    setActiveSettings(DEFAULT_SETTINGS);
+    settingsReadyRef.current = true;
+    setSettingsReady(true);
+    setTypedCodeword('');
+    typedCodewordRef.current = '';
+    codewordRef.current = '';
+    setScreen('welcome');
+  }
+
+  function errorSpeech(error: string, details?: string): string {
+    if (error === 'permission-denied') return 'Microphone permission was denied. Allow microphone access to use voice commands.';
+    let message: string;
+    if (error === 'network') message = 'The transcription service could not be reached. Check your internet connection and Supabase URL, or use the keyboard buttons.';
+    else if (error === 'timeout') message = 'Voice transcription timed out after 15 seconds. Check your internet connection and try again.';
+    else if (error === 'microphone-unavailable') message = 'Microphone is unavailable. Check browser permission and try again.';
+    else if (error === 'service-error') message = 'Speech transcription failed. Please try again or use the on-screen buttons.';
+    else if (error === 'configuration-error') message = 'Speech transcription is not configured. Please contact the app administrator.';
+    else if (error === 'unsupported') message = 'Voice listening is not supported in this browser. Use the on-screen buttons instead.';
+    else message = 'Something went wrong while listening. Please try again or use the on-screen buttons.';
+    return details ? `${message} Details: ${details}` : message;
+  }
+
+  function retryPrompt(prompt: string, token: number, handler: PromptHandler, attempt: number, errorMessage: string) {
+    setMessage(errorMessage);
+    if (attempt < 2) {
+      speak(errorMessage, { onDone: () => promptAndListen(prompt, token, handler, attempt + 1) });
+    } else {
+      speak(errorMessage);
+    }
+  }
+
+  function promptAndListen(
+    prompt: string,
+    token: number,
+    handler: PromptHandler,
+    attempt = 0,
+    sensitive = false,
+    displayPrompt = prompt,
+  ) {
+    if (token !== screenToken.current) return;
+    setMessage(displayPrompt);
+    speak(prompt, {
+      rememberLastResponse: !sensitive,
+      onDone: () => {
+        if (token !== screenToken.current) return;
+        void startListening((spokenText) => {
+          if (token !== screenToken.current) return;
+          stopListening(false);
+          const normalizedSpokenText = spokenText
+            .toLocaleLowerCase()
+            .trim()
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ');
+          if (sensitive) {
+            setHeard('Code word received (hidden)');
+            console.log('Voice heard: [code word redacted]');
+          } else {
+            setHeard(spokenText);
+            console.log('Voice heard:', spokenText);
+            setMessage(`I heard: ${spokenText}`);
+          }
+          const match = findVoiceCommand(normalizedSpokenText);
+          console.log(`[voice ${new Date().toISOString()}] Command mapped:`, match?.phrase ?? '[no match]');
+          if (token !== screenToken.current) return;
+          if (match && registeredSystemPhrases.has(match.phrase)) {
+            console.log(`[voice ${new Date().toISOString()}] Command executed:`, match.phrase);
+            void Promise.resolve(match.command.handler(normalizedSpokenText, match.phrase)).catch((error: unknown) => {
+              console.error('Voice command could not be completed.', error);
+              speak('I could not complete that command. Please try again.');
+            });
+            return;
+          }
+          console.log(`[voice ${new Date().toISOString()}] Prompt response handler executed.`);
+          const retryMessage = handler(normalizedSpokenText);
+          if (retryMessage) retryPrompt(prompt, token, handler, attempt, retryMessage);
+        }, (error, details) => {
+          if (token !== screenToken.current) return;
+          if (error === 'no-speech') {
+            setHeard('nothing');
+            retryPrompt(prompt, token, handler, attempt, "I didn't hear anything. Say it again.");
+          } else {
+            const message = errorSpeech(error, details);
+            setMessage(message);
+            speak(message);
+          }
+        });
+      },
+    });
+  }
+
+  function startWelcomeEntry(token: number) {
+    setMessage(`Welcome to ${APP_NAME}.`);
+    speak(APP_WELCOME_SPEECH, {
+      onDone: () => {
+        if (token !== screenToken.current) return;
+        promptAndListen('Say next to continue.', token, (spokenText) =>
+          /(?:^|\s)(?:next|continue)(?:\s|$)/i.test(spokenText)
+            ? (navigationRef.current.next(), null)
+            : 'I did not hear you. Say it again.',
+        );
+      },
+    });
+  }
+
+  function settingQuestion(step: SettingsStep): string {
+    if (step === 'text-size') return 'Accessibility options. Choose text size. Say small, medium, or large.';
+    if (step === 'color-theme') return 'Choose colour theme. Say light, dark, or high contrast.';
+    return 'Choose voice speed. Say slow, normal, or fast.';
+  }
+
+  function currentSettingLabel(step: SettingsStep, current: UserSettings): string {
+    if (step === 'text-size') {
+      if (current.textScale <= TEXT_SCALES[0]) return 'small';
+      if (current.textScale <= TEXT_SCALES[1]) return 'medium';
+      return 'large';
+    }
+    if (step === 'color-theme') return current.colorTheme === 'high-contrast' ? 'high contrast' : current.colorTheme;
+    if (current.speechRate <= SPEECH_RATES[0]) return 'slow';
+    if (current.speechRate <= SPEECH_RATES[1]) return 'normal';
+    return 'fast';
+  }
+
+  function continueSettings(stepIndex: number, token: number) {
+    if (token !== screenToken.current) return;
+    if (stepIndex >= settingSteps.length) {
+      settingsCompleteRef.current = true;
+      setSettingsComplete(true);
+      promptAndListen('Settings saved. Say next to continue.', token, (spokenText) =>
+        /(?:^|\s)(?:next|continue)(?:\s|$)/i.test(spokenText)
+          ? (navigationRef.current.next(), null)
+          : 'I did not hear you. Say it again.',
+      );
+      return;
+    }
+    const step = settingSteps[stepIndex];
+    settingsStepRef.current = step;
+    setSettingsStep(step);
+    askSetting(step, token, 0);
+  }
+
+  function askSetting(step: SettingsStep, token: number, attempt: number) {
+    const prompt = settingQuestion(step);
+    promptAndListen(prompt, token, (spokenText) => {
+      const normalized = spokenText.toLocaleLowerCase();
+      if (/\bskip\b/.test(normalized)) {
+        continueSettings(settingSteps.indexOf(step) + 1, token);
+        return null;
+      }
+      let choice: string | null = null;
+      if (step === 'text-size') {
+        if (/\b(small|smaller)\b/.test(normalized)) choice = 'small';
+        else if (/\b(medium|normal)\b/.test(normalized)) choice = 'medium';
+        else if (/\b(large|larger|big)\b/.test(normalized)) choice = 'large';
+      } else if (step === 'color-theme') {
+        if (/\b(high contrast|contrast)\b/.test(normalized)) choice = 'high-contrast';
+        else if (/\blight\b/.test(normalized)) choice = 'light';
+        else if (/\bdark\b/.test(normalized)) choice = 'dark';
+      } else if (/\b(slow|slower)\b/.test(normalized)) choice = 'slow';
+      else if (/\b(normal|medium)\b/.test(normalized)) choice = 'normal';
+      else if (/\b(fast|faster|quick)\b/.test(normalized)) choice = 'fast';
+
+      if (!choice) return 'I did not hear a valid choice. Say it again.';
+      void applySetting(step, choice, token);
+      return null;
+    }, attempt);
+  }
+
+  async function applySetting(step: SettingsStep, choice: string, token: number) {
+    if (settingActionPending.current) return;
+    settingActionPending.current = true;
+    const nextSettings: UserSettings = { ...settingsRef.current };
+    let confirmation: string;
+    if (step === 'text-size') {
+      nextSettings.textScale = choice === 'small' ? TEXT_SCALES[0] : choice === 'medium' ? TEXT_SCALES[1] : TEXT_SCALES[2];
+      confirmation = `Text size set to ${choice}.`;
+    } else if (step === 'color-theme') {
+      nextSettings.colorTheme = choice === 'high-contrast' ? 'high-contrast' : choice === 'dark' ? 'dark' : 'light';
+      confirmation = `Colour theme set to ${choice === 'high-contrast' ? 'high contrast' : choice}.`;
+    } else {
+      nextSettings.speechRate = choice === 'slow' ? SPEECH_RATES[0] : choice === 'normal' ? SPEECH_RATES[1] : SPEECH_RATES[2];
+      confirmation = `Voice speed set to ${choice}.`;
+    }
+    setActiveSettings(nextSettings);
+    let saveFailure = false;
+    if (sessionRef.current) {
+      try {
+        await saveUserSettings(sessionRef.current.user, nextSettings);
+      } catch (error) {
+        saveFailure = true;
+        console.error('Could not sync accessibility settings.', error);
+      }
+    }
+    if (token !== screenToken.current) {
+      settingActionPending.current = false;
+      return;
+    }
+    if (saveFailure) {
+      setMessage('Settings are saved on this device. Cloud sync is unavailable.');
+    }
+    speak(confirmation, {
+      onDone: () => {
+        settingActionPending.current = false;
+        if (token === screenToken.current) continueSettings(settingSteps.indexOf(step) + 1, token);
+      },
+      onStopped: () => {
+        settingActionPending.current = false;
+      },
+    });
+  }
+
+  function normalizeEmail(value: string): string {
+    return value.toLocaleLowerCase().trim()
+      .replace(/\bat\b/g, '@')
+      .replace(/\bdot\b/g, '.')
+      .replace(/\s+/g, '');
+  }
+
+  function normalizeCodeword(value: string): string {
+    return value.toLocaleLowerCase().trim().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+  }
+
+  function validEmail(value: string): boolean {
+    const separator = value.indexOf('@');
+    return separator > 0 && value.indexOf('.', separator + 1) > separator + 1;
+  }
+
+  function spellEmail(value: string): string {
+    return value.replace(/@/g, ' at ').replace(/\./g, ' dot ').trim().split(/\s+/)
+      .map((part) => part === 'at' || part === 'dot' ? part : part.split('').join(' '))
+      .join(' ');
+  }
+
+  function spellCodeword(value: string): string {
+    return value.split(' ').map((word) => word.split('').join(' ')).join(', ');
+  }
+
+  function askEmailConfirmation(token: number, candidate: string) {
+    setEmailConfirming(true);
+    const yes = () => {
+      setEmailConfirming(false);
+      setScreen('codeword');
+    };
+    const no = () => {
+      setEmailConfirming(false);
+      askForEmail(token, 0);
+    };
+    answerYesRef.current = yes;
+    answerNoRef.current = no;
+    promptAndListen(`I heard ${spellEmail(candidate)}. Is this correct? Say yes or no.`, token, (spokenText) => {
+      if (/\b(yes|correct|right)\b/i.test(spokenText)) {
+        yes();
+        return null;
+      }
+      if (/\b(no|incorrect|wrong)\b/i.test(spokenText)) {
+        no();
+        return null;
+      }
+      return 'Please say yes or no.';
+    });
+  }
+
+  function askForEmail(token: number, attempt: number) {
+    setEmailConfirming(false);
+    promptAndListen('Email. Please say your email.', token, (spokenText) => {
+      const candidate = normalizeEmail(spokenText);
+      if (!validEmail(candidate)) return 'That email does not look right. Say it again.';
+      emailRef.current = candidate;
+      setEmail(candidate);
+      askEmailConfirmation(token, candidate);
+      return null;
+    }, attempt);
+  }
+
+  function askCodewordConfirmation(token: number, candidate: string) {
+    setCodewordConfirming(true);
+    const yes = () => {
+      codewordRef.current = candidate;
+      setTypedCodeword('');
+      typedCodewordRef.current = '';
+      setCodewordConfirming(false);
+      setScreen('confirm');
+    };
+    const no = () => {
+      setCodewordConfirming(false);
+      askForCodeword(token, 0);
+    };
+    answerYesRef.current = yes;
+    answerNoRef.current = no;
+    promptAndListen(`I heard ${spellCodeword(candidate)}. Is this correct? Say yes or no.`, token, (spokenText) => {
+      if (/\b(yes|correct|right)\b/i.test(spokenText)) {
+        yes();
+        return null;
+      }
+      if (/\b(no|incorrect|wrong)\b/i.test(spokenText)) {
+        no();
+        return null;
+      }
+      return 'Please say yes or no.';
+    }, 0, true, 'Code word received (hidden). Is this correct? Say yes or no.');
+  }
+
+  function askForCodeword(token: number, attempt: number) {
+    setCodewordConfirming(false);
+    const error = authFeedback.current;
+    authFeedback.current = '';
+    const instruction = 'Code word. Say your code word. Use two easy words, like blue tiger.';
+    if (error) {
+      promptAndListen(
+        `${error} ${instruction}`,
+        token,
+        (spokenText) => handleCodeword(spokenText, token),
+        attempt,
+        true,
+      );
+      return;
+    }
+    promptAndListen(instruction, token, (spokenText) => handleCodeword(spokenText, token), attempt, true);
+  }
+
+  function handleCodeword(spokenText: string, token: number): string | null {
+    if (/\btry again\b/i.test(spokenText)) {
+      askForCodeword(token, 0);
+      return null;
+    }
+    const candidate = normalizeCodeword(spokenText);
+    if (candidate.replace(/\s/g, '').length < 6) return 'Please use a longer code word.';
+    askCodewordConfirmation(token, candidate);
+    return null;
+  }
+
+  function speakConfirmPrompt(token: number) {
+    const mode = authModeRef.current;
+    const action = mode === 'sign-up' ? 'Create this account' : 'Sign in';
+    const prompt = `Confirm ${mode === 'sign-up' ? 'account creation' : 'sign in'}. Email: ${spellEmail(emailRef.current)}. ${action}? Say yes or no.`;
+    const yes = () => { void submitAuth(); };
+    const no = () => {
+      codewordRef.current = '';
+      setTypedCodeword('');
+      setScreen('codeword');
+    };
+    answerYesRef.current = yes;
+    answerNoRef.current = no;
+    promptAndListen(prompt, token, (spokenText) => {
+      if (/\b(yes|correct|right)\b/i.test(spokenText)) {
+        yes();
+        return null;
+      }
+      if (/\b(no|incorrect|wrong)\b/i.test(spokenText)) {
+        no();
+        return null;
+      }
+      return 'Please say yes or no.';
+    });
+  }
+
   async function submitAuth() {
-    if (!email.trim() || !password) {
-      const nextMessage = 'Enter both your email address and password.';
-      setAuthMessage(nextMessage);
-      announce(nextMessage);
+    if (busyRef.current) return;
+    const normalizedEmail = normalizeEmail(emailRef.current);
+    const typedCandidate = normalizeCodeword(typedCodewordRef.current).replace(/\s/g, '');
+    const password = codewordRef.current || typedCandidate;
+    if (!validEmail(normalizedEmail)) {
+      setMessage('Enter a valid email address.');
+      speak('That email does not look right. Say it again.');
+      setScreen('email');
+      return;
+    }
+    if (password.length < 6) {
+      codewordRef.current = '';
+      setMessage('Please use a longer code word.');
+      speak('Please use a longer code word.');
+      setScreen('codeword');
       return;
     }
     if (!supabase) {
-      setAuthMessage('Supabase is not configured. Add the project URL and publishable key to your .env file, then restart Expo.');
+      setMessage('Sign in is unavailable because Supabase is not configured.');
+      speak('Sign in is unavailable right now. Please check the app configuration.');
       return;
     }
-
+    busyRef.current = true;
     setBusy(true);
-    setAuthMessage('');
+    setMessage(authModeRef.current === 'sign-up' ? 'Creating account.' : 'Signing in.');
+    speak(authModeRef.current === 'sign-up' ? 'Creating your account.' : 'Signing in.');
     try {
-      if (authMode === 'sign-up') {
-        const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+      if (authModeRef.current === 'sign-up') {
+        const { data, error } = await supabase.auth.signUp({ email: normalizedEmail, password });
         if (error) throw error;
-        if (!data.session) {
-          setAuthMessage('Account created. Check your email to confirm the account, then come back and sign in.');
-          speak('Account created. Check your email to confirm the account.');
+        if (data.session) {
+          enterAuthenticatedSession(data.session);
         } else {
-          speak(`Account created. Loading your ${APP_NAME} settings.`);
+          authFeedback.current = 'Account created. Check your email, then sign in.';
+          codewordRef.current = '';
+          setTypedCodeword('');
+          setAuthMode('sign-in');
+          authModeRef.current = 'sign-in';
+          setScreen('account');
         }
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        const { data, error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
         if (error) throw error;
-        setPendingSignInMessage(true);
+        if (data.session) enterAuthenticatedSession(data.session);
       }
     } catch (error) {
-      const nextMessage = error instanceof Error ? error.message : 'We could not complete that request. Try again.';
-      setAuthMessage(nextMessage);
-      announce(nextMessage);
+      console.error('Authentication request failed.', error);
+      authFeedback.current = 'Wrong email or code word. Say try again.';
+      codewordRef.current = '';
+      setTypedCodeword('');
+      typedCodewordRef.current = '';
+      setScreen('codeword');
+      setMessage(authFeedback.current);
     } finally {
+      codewordRef.current = '';
+      busyRef.current = false;
       setBusy(false);
     }
   }
 
-  async function updateSettings(nextSettings: UserSettings) {
-    setSettings(nextSettings);
-    if (!session) return;
-    setSettingsMessage('Saving your settings…');
-    try {
-      await saveUserSettings(session.user, nextSettings);
-      setSettingsMessage('Saved to your account.');
-      announce('Settings saved to your account.');
-    } catch {
-      setSettingsMessage('Saved on this phone, but not synced. Check your connection and Supabase setup.');
-      announce('Settings saved on this phone, but could not sync to your account.');
+  function selectAccount(mode: AuthMode) {
+    setAuthMode(mode);
+    authModeRef.current = mode;
+    authFeedback.current = '';
+    setScreen('email');
+  }
+
+  function completeSettingsAndNavigate() {
+    setScreen(sessionRef.current ? 'home' : 'account');
+  }
+
+  function skipCurrentSetting() {
+    if (screenRef.current !== 'accessibility') return;
+    if (settingActionPending.current) return;
+    if (settingsCompleteRef.current) {
+      completeSettingsAndNavigate();
+      return;
+    }
+    continueSettings(settingSteps.indexOf(settingsStepRef.current) + 1, screenToken.current);
+  }
+
+  function goNext() {
+    const current = screenRef.current;
+    if (current === 'welcome') {
+      if (Platform.OS === 'web' && !webWelcomeStartedRef.current) {
+        webWelcomeStartedRef.current = true;
+        setWebWelcomeStarted(true);
+        startScreenEntry('welcome');
+      } else {
+        setScreen('accessibility');
+      }
+    } else if (current === 'accessibility') {
+      if (!settingsCompleteRef.current) skipCurrentSetting();
+      else completeSettingsAndNavigate();
+    } else if (current === 'account') {
+      setScreen('email');
+    } else if (current === 'email') {
+      const candidate = normalizeEmail(emailRef.current);
+      if (!validEmail(candidate)) {
+        speak('That email does not look right. Enter or say your email.');
+        return;
+      }
+      if (emailConfirming) answerYesRef.current();
+      else setScreen('codeword');
+    } else if (current === 'codeword') {
+      if (codewordConfirming) {
+        answerYesRef.current();
+        return;
+      }
+      const candidate = normalizeCodeword(typedCodewordRef.current);
+      if (candidate.replace(/\s/g, '').length < 6) {
+        speak('Please use a longer code word.');
+        return;
+      }
+      codewordRef.current = candidate.replace(/\s/g, '');
+      setTypedCodeword('');
+      typedCodewordRef.current = '';
+      setScreen('confirm');
+    } else if (current === 'confirm') {
+      answerYesRef.current();
+    } else {
+      speak('You are on the home screen. Say back to return to accessibility options.');
     }
   }
 
-  function startWebWelcome() {
-    if (webWelcomeStarted) return;
+  function goBack() {
+    const current = screenRef.current;
+    if (current === 'welcome') {
+      speak('You are on the welcome screen.');
+    } else if (current === 'accessibility') {
+      setScreen('welcome');
+    } else if (current === 'account') {
+      setScreen('accessibility');
+    } else if (current === 'email') {
+      setScreen('account');
+    } else if (current === 'codeword') {
+      codewordRef.current = '';
+      setTypedCodeword('');
+      setScreen('email');
+    } else if (current === 'confirm') {
+      codewordRef.current = '';
+      setTypedCodeword('');
+      setScreen('codeword');
+    } else {
+      setScreen('accessibility');
+    }
+  }
+
+  function startScreenEntry(nextScreen: Screen) {
+    if (!sessionReadyRef.current || !settingsReadyRef.current) return;
+    if (nextScreen === 'welcome' && Platform.OS === 'web' && !webWelcomeStartedRef.current) return;
+    if (enteredScreen.current === nextScreen) return;
+    enteredScreen.current = nextScreen;
+    const token = ++screenToken.current;
+    setHeard('');
+    setMessage('');
+    answerYesRef.current = () => undefined;
+    answerNoRef.current = () => undefined;
+    stopSpeaking();
+
+    if (nextScreen === 'welcome') {
+      startWelcomeEntry(token);
+    } else if (nextScreen === 'accessibility') {
+      settingActionPending.current = false;
+      settingsCompleteRef.current = false;
+      setSettingsComplete(false);
+      settingsStepRef.current = 'text-size';
+      setSettingsStep('text-size');
+      continueSettings(0, token);
+    } else if (nextScreen === 'account') {
+      const feedback = authFeedback.current;
+      authFeedback.current = '';
+      const prompt = feedback || 'Choose account. Say sign in or create account.';
+      promptAndListen(prompt, token, (spokenText) => {
+        if (/\b(create|new)\b.*\baccount\b/i.test(spokenText)) {
+          selectAccount('sign-up');
+          return null;
+        }
+        if (/\b(sign|log)\s*in\b/i.test(spokenText)) {
+          selectAccount('sign-in');
+          return null;
+        }
+        return 'Say sign in or create account.';
+      });
+    } else if (nextScreen === 'email') {
+      askForEmail(token, 0);
+    } else if (nextScreen === 'codeword') {
+      retryAuthRef.current = () => askForCodeword(token, 0);
+      askForCodeword(token, 0);
+    } else if (nextScreen === 'confirm') {
+      speakConfirmPrompt(token);
+    } else {
+      promptAndListen('Home. Say voice help, repeat, stop, or sign out.', token, (spokenText) => {
+        if (/\b(sign out|log out|logout)\b/i.test(spokenText)) return null;
+        return 'I did not hear you. Say it again.';
+      });
+    }
+  }
+
+  useEffect(() => {
+    const unregister = [
+      registerCommand(['next', 'next page'], () => navigationRef.current.next(), 'Go to the next screen'),
+      registerCommand(['back', 'previous page'], () => navigationRef.current.back(), 'Go back to the previous screen'),
+      registerCommand('yes', () => answerYesRef.current(), 'Confirm the current choice'),
+      registerCommand('no', () => answerNoRef.current(), 'Reject the current choice'),
+      registerCommand('skip', () => navigationRef.current.skip(), 'Keep the current setting and continue'),
+      registerCommand(['sign in', 'log in'], () => selectAccount('sign-in'), 'Choose sign in'),
+      registerCommand(['create account', 'sign up'], () => selectAccount('sign-up'), 'Choose create account'),
+      registerCommand(['sign out', 'log out'], async () => {
+        if (!supabase) {
+          speak('Sign out is unavailable right now.');
+          return;
+        }
+        const { error } = await supabase.auth.signOut();
+        if (error) {
+          console.error('Could not sign out.', error);
+          speak('Could not sign out. Please try again.');
+        } else {
+          speak('Signed out.');
+        }
+      }, 'Sign out of your account'),
+      registerCommand('try again', () => retryAuthRef.current(), 'Try entering the code word again'),
+    ];
+    const removeBackShortcut = registerShortcut('Alt+B', 'Go back to the previous screen', () => navigationRef.current.back());
+    return () => {
+      unregister.forEach((remove) => remove());
+      removeBackShortcut();
+    };
+  }, [registerCommand, registerShortcut, speak]);
+
+  useEffect(() => {
+    const current = screen;
+    startScreenEntry(current);
+    return () => {
+      screenToken.current += 1;
+      enteredScreen.current = null;
+      stopListening(false);
+      stopSpeaking();
+    };
+    // Screen entry speech is intentionally keyed only to the screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen]);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!supabase) {
+      sessionReadyRef.current = true;
+      settingsReadyRef.current = true;
+      setSessionReady(true);
+      setSettingsReady(true);
+      return () => { mounted = false; };
+    }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (!mounted) return;
+      if (event === 'SIGNED_IN' && nextSession) {
+        enterAuthenticatedSession(nextSession);
+      } else if (event === 'SIGNED_OUT') {
+        resetSignedOutState();
+      } else if (nextSession) {
+        sessionRef.current = nextSession;
+        setSession(nextSession);
+      }
+    });
+    void supabase.auth.getSession().then(async ({ data, error }) => {
+      if (!mounted) return;
+      if (error) {
+        console.error('Could not restore the saved sign-in.', error);
+      }
+      const restoredSession = data.session;
+      sessionRef.current = restoredSession;
+      setSession(restoredSession);
+      if (restoredSession) {
+        settingsReadyRef.current = false;
+        setSettingsReady(false);
+        try {
+          await syncSettings(restoredSession);
+        } catch (settingsError) {
+          console.error('Could not load accessibility settings.', settingsError);
+          settingsReadyRef.current = true;
+          setSettingsReady(true);
+        }
+      } else {
+        settingsReadyRef.current = true;
+        setSettingsReady(true);
+      }
+      sessionReadyRef.current = true;
+      setSessionReady(true);
+      startScreenEntry(screenRef.current);
+    }).catch((error: unknown) => {
+      if (!mounted) return;
+      console.error('Could not initialize the account session.', error);
+      sessionReadyRef.current = true;
+      settingsReadyRef.current = true;
+      setSessionReady(true);
+      setSettingsReady(true);
+      startScreenEntry(screenRef.current);
+    });
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+    // Session restoration is performed once at app startup.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const focusStyle = document.createElement('style');
+    focusStyle.dataset.accessibilityFocus = 'true';
+    focusStyle.textContent = [
+      '[role="button"]:focus-visible, button:focus-visible, input:focus-visible,',
+      'textarea:focus-visible, select:focus-visible {',
+      'outline: 4px solid #ffbf00 !important;',
+      'outline-offset: 3px !important;',
+      '}',
+    ].join(' ');
+    document.head.appendChild(focusStyle);
+    const handleNavigationKey = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && (
+        target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      )) return;
+      if (screenRef.current === 'welcome' && !webWelcomeStartedRef.current) {
+        event.preventDefault();
+        webWelcomeStartedRef.current = true;
+        setWebWelcomeStarted(true);
+        startScreenEntry('welcome');
+        return;
+      }
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        navigationRef.current.next();
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        navigationRef.current.back();
+      }
+    };
+    window.addEventListener('keydown', handleNavigationKey);
+    return () => {
+      window.removeEventListener('keydown', handleNavigationKey);
+      focusStyle.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (screen !== 'welcome') return;
+    setWelcomeText('');
+    const fullText = `Welcome to ${APP_NAME}`;
+    let index = 0;
+    const timer = setInterval(() => {
+      index += 1;
+      setWelcomeText(fullText.slice(0, index));
+      if (index >= fullText.length) clearInterval(timer);
+    }, 65);
+    return () => clearInterval(timer);
+  }, [screen]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    if (screen === 'email') setTimeout(() => emailInputRef.current?.focus(), 100);
+    if (screen === 'codeword') setTimeout(() => codewordInputRef.current?.focus(), 100);
+  }, [screen]);
+
+  const goNextRef = useRef(goNext);
+  const goBackRef = useRef(goBack);
+  const skipSettingRef = useRef(skipCurrentSetting);
+  goNextRef.current = goNext;
+  goBackRef.current = goBack;
+  skipSettingRef.current = skipCurrentSetting;
+  navigationRef.current = {
+    next: () => goNextRef.current(),
+    back: () => goBackRef.current(),
+    skip: () => skipSettingRef.current(),
+  };
+
+  const panResponderRef = useRef<ReturnType<typeof PanResponder.create> | null>(null);
+  if (!panResponderRef.current) {
+    panResponderRef.current = PanResponder.create({
+      onMoveShouldSetPanResponder: (event, gesture) => {
+        if (
+          Platform.OS === 'web' &&
+          typeof HTMLElement !== 'undefined' &&
+          event.target instanceof HTMLElement &&
+          event.target.closest('input, textarea, select, [contenteditable="true"]')
+        ) return false;
+        return Math.abs(gesture.dx) > 55 && Math.abs(gesture.dx) > Math.abs(gesture.dy);
+      },
+      onPanResponderRelease: (_, gesture) => {
+        if (gesture.dx > 55) navigationRef.current.next();
+        else if (gesture.dx < -55) navigationRef.current.back();
+      },
+    });
+  }
+
+  const currentStepChoices = settingsStep === 'text-size'
+    ? [
+        { label: 'Small text', value: 'small' },
+        { label: 'Medium text', value: 'medium' },
+        { label: 'Large text', value: 'large' },
+      ]
+    : settingsStep === 'color-theme'
+      ? [
+          { label: 'Light theme', value: 'light' },
+          { label: 'Dark theme', value: 'dark' },
+          { label: 'High contrast', value: 'high-contrast' },
+        ]
+      : [
+          { label: 'Slow voice', value: 'slow' },
+          { label: 'Normal voice', value: 'normal' },
+          { label: 'Fast voice', value: 'fast' },
+        ];
+
+  useEffect(() => {
+    if (screen !== 'accessibility') return;
+    const removeShortcuts = currentStepChoices.map((choice, index) =>
+      registerShortcut(`Alt+${index + 1}`, choice.label, () => chooseSettingButton(choice.value)),
+    );
+    return () => removeShortcuts.forEach((remove) => remove());
+  }, [screen, settingsStep, registerShortcut]);
+
+  const chooseSettingButton = (value: string) => {
+    const token = screenToken.current;
+    void applySetting(settingsStepRef.current, value, token);
+  };
+
+  const startWelcomeFromWeb = () => {
+    if (webWelcomeStartedRef.current) return;
+    webWelcomeStartedRef.current = true;
     setWebWelcomeStarted(true);
-  }
+    startScreenEntry('welcome');
+  };
 
-  const frame = (children: React.ReactNode, footer?: string) => (
-    <SafeAreaProvider>
-      <SafeAreaView style={{ flex: 1, backgroundColor: palette.background }}>
-        <StatusBar style={settings.colorTheme === 'light' ? 'dark' : 'light'} />
-        {Platform.OS === 'web' && !webWelcomeStarted ? (
-          <Pressable
-            accessibilityLabel={`Welcome to ${APP_NAME}. Press Enter or tap anywhere to start.`}
-            accessibilityRole="button"
-            focusable
-            onPress={startWebWelcome}
-            style={s.webWelcomeGate}
-          >
-            <Text style={s.webWelcomeText}>
-              Welcome to {APP_NAME}. Press Enter or tap anywhere to start.
-            </Text>
-          </Pressable>
-        ) : (
-          <ScrollView contentContainerStyle={s.scrollContent} keyboardShouldPersistTaps="handled">
-            <View style={s.header}>
-              <Text style={s.brand}>{APP_NAME}</Text>
-              <AppText scale={scale} color={palette.muted}>A more accessible way to get things done</AppText>
-            </View>
-            <View style={s.card}>{children}</View>
-            {!!footer && <AppText scale={scale} color={palette.muted} style={s.footer}>{footer}</AppText>}
-          </ScrollView>
-        )}
-      </SafeAreaView>
-    </SafeAreaProvider>
-  );
-
-  if (!sessionReady) {
-    return frame(<AppText scale={scale} color={palette.text} accessibilityRole="text">Restoring your account…</AppText>);
-  }
-
-  if (screen === 'welcome') {
-    return frame(
-      <>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Welcome to {APP_NAME}</AppText>
-        <AppText scale={scale} color={palette.text} style={s.body}>
-          Designed for blind and low-vision people, with clear steps and controls that work with assistive technology.
-        </AppText>
-        <VoiceOptions
-          scale={scale}
-          palette={palette}
-          onSettings={() => {
-            speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
-            setScreen('settings');
-          }}
-          onSignIn={() => { setAuthMessage(''); setScreen('auth'); }}
-          includeSignIn
-        />
-      </>,
-      'Accessible welcome, accounts, and personal settings',
-    );
-  }
-
-  if (screen === 'auth') {
-    return frame(
-      <>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>{authMode === 'sign-in' ? 'Sign in' : 'Create your account'}</AppText>
-        <AppText scale={scale} color={palette.text} style={s.body}>
-          Your account is managed by Supabase. {APP_NAME} never reads your password aloud.
-        </AppText>
-        <VoiceOptions
-          scale={scale}
-          palette={palette}
-          onSettings={() => {
-            speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
-            setScreen('settings');
-          }}
-        />
-        <AppText scale={scale} color={palette.text} style={s.label}>Email address</AppText>
-        <TextInput
-          accessibilityLabel="Email address"
-          autoCapitalize="none"
-          autoComplete="email"
-          autoCorrect={false}
-          keyboardType="email-address"
-          onChangeText={setEmail}
-          returnKeyType="next"
-          style={s.input}
-          textContentType="emailAddress"
-          value={email}
-        />
-        <AppText scale={scale} color={palette.text} style={s.label}>Password</AppText>
-        <TextInput
-          accessibilityLabel="Password. Password content is hidden."
-          autoCapitalize="none"
-          autoComplete={authMode === 'sign-up' ? 'new-password' : 'password'}
-          onChangeText={setPassword}
-          onSubmitEditing={() => { void submitAuth(); }}
-          returnKeyType="done"
-          secureTextEntry
-          style={s.input}
-          textContentType={authMode === 'sign-up' ? 'newPassword' : 'password'}
-          value={password}
-        />
-        {!!password.length && <AppText scale={scale} color={palette.muted} style={s.hint}>{password.length} characters entered. Password content stays hidden.</AppText>}
-        {!!authMessage && <AppText accessibilityRole="alert" scale={scale} color={palette.error} style={s.hint}>{authMessage}</AppText>}
-        {!isSupabaseConfigured && <AppText accessibilityRole="alert" scale={scale} color={palette.error} style={s.hint}>Backend setup is incomplete. Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY to .env.</AppText>}
-        <ActionButton label={busy ? 'Please wait…' : authMode === 'sign-in' ? 'Sign in' : 'Create account'} onPress={() => { void submitAuth(); }} scale={scale} palette={palette} disabled={busy || !isSupabaseConfigured} />
-        <ActionButton label={authMode === 'sign-in' ? 'New here? Create an account' : 'Already registered? Sign in'} onPress={() => { setAuthMode(authMode === 'sign-in' ? 'sign-up' : 'sign-in'); setAuthMessage(''); }} scale={scale} palette={palette} secondary />
-        <ActionButton label="Back to welcome" onPress={() => setScreen('welcome')} scale={scale} palette={palette} secondary />
-      </>,
-      'Email confirmation may be required before you can sign in.',
-    );
-  }
-
-  if (screen === 'settings') {
-    const chooseTheme = (colorTheme: ColorTheme) => { void updateSettings({ ...settings, colorTheme }); };
-    return frame(
-      <>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Accessibility settings</AppText>
-        <AppText scale={scale} color={palette.text} style={s.body}>These preferences are saved to your {APP_NAME} account and restored when you sign in.</AppText>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.sectionTitle}>Text size</AppText>
-        <View accessibilityRole="radiogroup" style={s.optionGroup}>
-          {TEXT_SCALES.map((value) => (
-            <ActionButton key={value} label={`${Math.round(value * 100)}% text`} onPress={() => { void updateSettings({ ...settings, textScale: value }); }} scale={scale} palette={palette} secondary selected={settings.textScale === value} />
-          ))}
-        </View>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.sectionTitle}>Colour theme</AppText>
-        <View accessibilityRole="radiogroup" style={s.optionGroup}>
-          {([
-            ['light', 'Light'],
-            ['high-contrast', 'High contrast'],
-            ['dark', 'Dark'],
-          ] as const).map(([value, label]) => (
-            <ActionButton key={value} label={label} onPress={() => chooseTheme(value)} scale={scale} palette={palette} secondary selected={settings.colorTheme === value} />
-          ))}
-        </View>
-        <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.sectionTitle}>Voice speed</AppText>
-        <AppText scale={scale} color={palette.text} style={s.body}>
-          {settings.speechRate.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}× preferred speed. Spoken messages use this speed.
-        </AppText>
-        <View accessibilityRole="radiogroup" style={s.optionGroup}>
-          {SPEECH_RATES.map((value) => (
-            <ActionButton key={value} label={`${value}×`} onPress={() => { void updateSettings({ ...settings, speechRate: value }); }} scale={scale} palette={palette} secondary selected={settings.speechRate === value} />
-          ))}
-        </View>
-        {!!settingsMessage && <AppText accessibilityLiveRegion="polite" scale={scale} color={palette.muted} style={s.hint}>{settingsMessage}</AppText>}
-        <ActionButton label="Back to home" onPress={() => setScreen('home')} scale={scale} palette={palette} />
-      </>,
-    );
-  }
-
-  return frame(
-    <>
-      <AppText accessibilityRole="header" scale={scale} color={palette.text} style={s.title}>Welcome to {APP_NAME}</AppText>
-      <AppText scale={scale} color={palette.text} style={s.body}>Your account settings are ready. Voice tools, notes and reminders, photo descriptions, and emergency contacts can connect here in later project work.</AppText>
-      <VoiceOptions
-        scale={scale}
-        palette={palette}
-        onSettings={() => {
-          speak('Accessibility settings. Choose text size, colour theme, or voice speed.');
-          setScreen('settings');
-        }}
-      />
-      {!!settingsMessage && <AppText accessibilityLiveRegion="polite" scale={scale} color={palette.muted} style={s.hint}>{settingsMessage}</AppText>}
-      <ActionButton label={busy ? 'Signing out…' : 'Sign out'} onPress={() => { void signOut(); }} scale={scale} palette={palette} secondary disabled={busy} />
-    </>,
-    `Signed in as ${session?.user.email ?? 'your account'}`,
-  );
-}
-
-export default function App() {
-  const showVoiceDemo =
-    __DEV__ &&
-    Platform.OS === 'web' &&
-    typeof window !== 'undefined' &&
-    new URLSearchParams(window.location.search).get('voiceDemo') === '1';
+  const contentStyles = makeScreenStyles(palette, scale);
 
   return (
-    <VoiceProvider>
-      {showVoiceDemo ? <VoiceDemoScreen /> : <AppContent />}
-    </VoiceProvider>
+    <SafeAreaView style={{ flex: 1, backgroundColor: palette.background }}>
+      <StatusBar style={settings.colorTheme === 'light' ? 'dark' : 'light'} />
+      <View style={contentStyles.frame} {...panResponderRef.current.panHandlers}>
+        <View style={contentStyles.navigation}>
+          <AppButton label="Back" onPress={() => navigationRef.current.back()} palette={palette} scale={scale} secondary compact />
+          <AppButton label="Next" onPress={() => navigationRef.current.next()} palette={palette} scale={scale} compact disabled={busy} />
+        </View>
+        <ScrollView contentContainerStyle={contentStyles.body} keyboardShouldPersistTaps="handled">
+          <Text accessibilityRole="header" style={contentStyles.title}>
+            {screen === 'welcome' ? welcomeText || 'Welcome' :
+              screen === 'accessibility' ? 'Accessibility options' :
+              screen === 'account' ? 'Choose account' :
+              screen === 'email' ? 'Email' :
+              screen === 'codeword' ? 'Code word' :
+              screen === 'confirm' ? 'Confirm' : 'Home'}
+          </Text>
+          <Text accessibilityLiveRegion="polite" style={contentStyles.message}>
+            {message || (screen === 'welcome' ? `Welcome to ${APP_NAME}.` :
+              screen === 'accessibility' ? 'Choose one setting at a time.' :
+              screen === 'account' ? 'Choose sign in or create account.' :
+              screen === 'email' ? 'Say or type your email address.' :
+              screen === 'codeword' ? 'Say or type your code word.' :
+              screen === 'confirm' ? 'Confirm to continue.' : 'Voice options')}
+          </Text>
+          <Text accessibilityLiveRegion="polite" style={contentStyles.heard}>
+            {`I heard: ${heard || lastHeard || 'nothing yet'}`}
+          </Text>
+
+          {screen === 'welcome' && Platform.OS === 'web' && !webWelcomeStarted && (
+            <Pressable
+              accessibilityLabel={`Welcome to ${APP_NAME}. Press Enter or tap anywhere to start.`}
+              accessibilityRole="button"
+              onPress={startWelcomeFromWeb}
+              style={contentStyles.startBanner}
+            >
+              <Text style={contentStyles.startBannerText}>
+                Welcome to {APP_NAME}. Press Enter or tap anywhere to start.
+              </Text>
+            </Pressable>
+          )}
+
+          {screen === 'accessibility' && (
+            <View style={contentStyles.choices}>
+              {currentStepChoices.map(({ label, value }) => (
+                <AppButton
+                  key={value}
+                  label={label}
+                  onPress={() => chooseSettingButton(value)}
+                  palette={palette}
+                  scale={scale}
+                  secondary
+                  selected={currentSettingLabel(settingsStep, settings) === value}
+                />
+              ))}
+            </View>
+          )}
+
+          {screen === 'account' && (
+            <View style={contentStyles.choices}>
+              <AppButton label="Sign in" onPress={() => selectAccount('sign-in')} palette={palette} scale={scale} />
+              <AppButton label="Create account" onPress={() => selectAccount('sign-up')} palette={palette} scale={scale} secondary />
+            </View>
+          )}
+
+          {screen === 'email' && (
+            <View style={contentStyles.form}>
+              <TextInput
+                ref={emailInputRef}
+                accessibilityLabel="Email address"
+                accessibilityHint="Type your email address, or say it when prompted."
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect={false}
+                keyboardType="email-address"
+                onChangeText={(value) => {
+                  emailRef.current = value;
+                  setEmail(value);
+                }}
+                placeholder="Email address"
+                placeholderTextColor={palette.muted}
+                returnKeyType="next"
+                value={email}
+                style={contentStyles.input}
+              />
+              {emailConfirming && (
+                <View style={contentStyles.inlineChoices}>
+                  <AppButton label="Yes, correct" onPress={() => answerYesRef.current()} palette={palette} scale={scale} />
+                  <AppButton label="No, try again" onPress={() => answerNoRef.current()} palette={palette} scale={scale} secondary />
+                </View>
+              )}
+            </View>
+          )}
+
+          {screen === 'codeword' && (
+            <View style={contentStyles.form}>
+              <TextInput
+                ref={codewordInputRef}
+                accessibilityLabel="Code word"
+                accessibilityHint="Type your code word. It is hidden while typing."
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect={false}
+                onChangeText={(value) => {
+                  typedCodewordRef.current = value;
+                  setTypedCodeword(value);
+                }}
+                placeholder="Code word"
+                placeholderTextColor={palette.muted}
+                secureTextEntry
+                value={typedCodeword}
+                style={contentStyles.input}
+              />
+              {codewordConfirming && (
+                <View style={contentStyles.inlineChoices}>
+                  <AppButton label="Yes, correct" onPress={() => answerYesRef.current()} palette={palette} scale={scale} />
+                  <AppButton label="No, try again" onPress={() => answerNoRef.current()} palette={palette} scale={scale} secondary />
+                </View>
+              )}
+            </View>
+          )}
+
+          {screen === 'confirm' && (
+            <View style={contentStyles.choices}>
+              <AppButton label={authMode === 'sign-up' ? 'Create account' : 'Sign in'} onPress={() => answerYesRef.current()} palette={palette} scale={scale} disabled={busy} />
+              <AppButton label="No, go back" onPress={() => answerNoRef.current()} palette={palette} scale={scale} secondary disabled={busy} />
+            </View>
+          )}
+
+          {screen === 'home' && (
+            <View style={contentStyles.choices}>
+              <Text accessibilityRole="header" style={contentStyles.sectionTitle}>Voice options</Text>
+              <Text accessibilityLabel="Account email address" style={contentStyles.message}>
+                Email: {email || session?.user.email || 'No email address available'}
+              </Text>
+              <AppButton
+                label="Read email address"
+                onPress={() => {
+                  const accountEmail = email || session?.user.email || '';
+                  speak(accountEmail
+                    ? `Your email address is ${spellEmail(accountEmail)}.`
+                    : 'No email address is available.');
+                }}
+                palette={palette}
+                scale={scale}
+                secondary
+              />
+              <AppButton label="Voice help" onPress={readHelp} palette={palette} scale={scale} secondary />
+              <AppButton label="Repeat" onPress={repeatLastResponse} palette={palette} scale={scale} secondary />
+              <AppButton label="Stop" onPress={() => { stopListening(false); stopSpeaking(); }} palette={palette} scale={scale} secondary />
+              {Platform.OS === 'web' && <VoiceButton />}
+              <AppButton
+                label="Sign out"
+                onPress={() => {
+                  const command = findVoiceCommand('sign out');
+                  if (command) void command.command.handler('sign out', command.phrase);
+                }}
+                palette={palette}
+                scale={scale}
+                secondary
+                compact
+              />
+            </View>
+          )}
+        </ScrollView>
+      </View>
+    </SafeAreaView>
   );
 }
 
-function makeStyles(palette: ReturnType<typeof paletteFor>, scale: number) {
+function makeScreenStyles(palette: Palette, scale: number) {
   return StyleSheet.create({
-    scrollContent: { flexGrow: 1, justifyContent: 'center', padding: 24 },
-    header: { marginBottom: 24, gap: 8 },
-    brand: { color: palette.text, fontSize: 34 * scale, lineHeight: 42 * scale, fontWeight: '800', letterSpacing: 0.3 },
-    card: { backgroundColor: palette.card, borderColor: palette.border, borderWidth: 2, borderRadius: 20, padding: 24, gap: 10 },
-    title: { fontSize: 28 * scale, lineHeight: 36 * scale, fontWeight: '800', marginBottom: 4 },
-    sectionTitle: { fontSize: 21 * scale, lineHeight: 29 * scale, fontWeight: '800', marginTop: 12 },
-    body: { marginBottom: 8 },
-    label: { fontWeight: '700', marginTop: 8 },
-    input: { backgroundColor: palette.input, color: palette.text, borderColor: palette.border, borderWidth: 2, borderRadius: 10, minHeight: 56, paddingHorizontal: 14, fontSize: 18 * scale, marginBottom: 8 },
-    button: { borderRadius: 12, minHeight: 58, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, marginTop: 4 },
-    hint: { marginTop: 6 },
-    footer: { textAlign: 'center', marginTop: 20 },
-    optionGroup: { gap: 6 },
-    webWelcomeGate: {
+    frame: { flex: 1, paddingHorizontal: 16 * scale },
+    navigation: {
+      flexDirection: 'row',
+      gap: 12,
+      justifyContent: 'space-between',
+      paddingVertical: 8,
+    },
+    body: { flexGrow: 1, gap: 14, paddingBottom: 24, paddingTop: 8 },
+    title: { color: palette.text, fontSize: 30 * scale, fontWeight: '900', lineHeight: 38 * scale },
+    message: { color: palette.text, fontSize: 19 * scale, lineHeight: 27 * scale },
+    heard: {
+      color: palette.muted,
+      fontSize: 17 * scale,
+      fontWeight: '700',
+      lineHeight: 24 * scale,
+      minHeight: 26 * scale,
+    },
+    choices: { gap: 12, marginTop: 8 },
+    form: { gap: 12, marginTop: 4 },
+    inlineChoices: { gap: 12 },
+    input: {
+      backgroundColor: palette.input,
+      borderColor: palette.border,
+      borderRadius: 14,
+      borderWidth: 3,
+      color: palette.text,
+      fontSize: 20 * scale,
+      minHeight: 64,
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+    },
+    startBanner: {
       alignItems: 'center',
       backgroundColor: '#000000',
       borderColor: '#ffeb00',
-      borderWidth: 5,
-      flex: 1,
+      borderRadius: 18,
+      borderWidth: 4,
       justifyContent: 'center',
-      padding: 32,
+      minHeight: 112,
+      padding: 20,
     },
-    webWelcomeText: {
-      color: '#ffeb00',
-      fontSize: 30 * scale,
-      fontWeight: '800',
-      lineHeight: 42 * scale,
-      textAlign: 'center',
-    },
+    startBannerText: { color: '#ffffff', fontSize: 24 * scale, fontWeight: '900', textAlign: 'center' },
+    sectionTitle: { color: palette.text, fontSize: 24 * scale, fontWeight: '900', lineHeight: 32 * scale },
   });
 }
 
-const buttonStyles = StyleSheet.create({
+const styles = StyleSheet.create({
   button: {
-    borderRadius: 12,
-    minHeight: 58,
-    justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    marginTop: 4,
+    borderRadius: 16,
+    justifyContent: 'center',
+    minHeight: 68,
+    paddingHorizontal: 18,
+    paddingVertical: 12,
   },
+  compactButton: { minHeight: 48, minWidth: 96, paddingHorizontal: 12, paddingVertical: 8 },
 });
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <VoiceProvider>
+        <AppContent />
+      </VoiceProvider>
+    </SafeAreaProvider>
+  );
+}
