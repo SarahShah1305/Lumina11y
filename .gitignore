@@ -16,3 +16,4 @@ yarn-debug.log*
 *.orig.*
 android/
 ios/
+supabase/.temp/

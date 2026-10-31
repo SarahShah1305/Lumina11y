@@ -9,12 +9,27 @@
       "backgroundColor": "#102a43"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Lumina needs the microphone to hear your voice commands."
+      }
     },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#102a43"
       }
-    }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-status-bar",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Lumina needs the microphone to hear your voice commands."
+        }
+      ]
+    ]
   }
 }
