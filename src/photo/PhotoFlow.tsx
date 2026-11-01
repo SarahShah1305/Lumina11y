@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CameraView, useCameraPermissions, type CameraCapturedPicture } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { useVoice, VoiceButton } from '../voice';
+import { useVoice } from '../voice';
 import { analyzeImage, checkImagePosition, type PhotoAnalysis, type PhotoMode, type PhotoQuality } from './analyzeImage';
 
 type Palette = {
@@ -38,6 +38,7 @@ const qualityMessages: Partial<Record<PhotoQuality, string>> = {
   too_far: 'Move closer to the object and try again.',
   too_close: 'Move the phone a little further back and try again.',
   partly_cut_off: 'Part of the object is cut off. Keep the whole object in view and try again.',
+  wrong_angle: 'Hold the phone straight in front of the object, then try again.',
 };
 
 function PhotoButton({
@@ -168,7 +169,10 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
 
   useEffect(() => {
     if (!spokenViewPrompt) return;
-    speak(spokenViewPrompt, { onDone: () => { void startListening(); } });
+    const promptTimer = setTimeout(() => {
+      speak(spokenViewPrompt, { onDone: () => { void startListening(); } });
+    }, 100);
+    return () => clearTimeout(promptTimer);
   }, [speak, spokenViewPrompt, startListening]);
 
   useEffect(() => () => {
@@ -197,12 +201,17 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
   }, [mode, speak, stopSpeaking]);
 
   const selectMode = useCallback((selectedMode: PhotoMode) => {
+    const alreadyOnCamera = view === 'camera';
     stopSpeaking();
     setMode(selectedMode);
     setErrorMessage('');
     setPositionMessage('');
     setView('camera');
-  }, [stopSpeaking]);
+    if (alreadyOnCamera) {
+      const label = modeOptions.find((option) => option.mode === selectedMode)?.label || 'Photo';
+      speak(`${label} selected.`, { onDone: () => { void startListening(); } });
+    }
+  }, [speak, startListening, stopSpeaking, view]);
 
   const takePhoto = useCallback(async () => {
     if (!cameraRef.current) return;
@@ -221,27 +230,27 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
     setPositionBusy(true);
     setErrorMessage('');
     setPositionMessage('Checking the camera position.');
+    stopListening(false);
     stopSpeaking();
-    speak('Checking the camera position.');
     try {
       const picture = await cameraRef.current.takePictureAsync({ quality: 0.35, skipProcessing: true });
       if (!picture?.uri) throw new Error('The camera could not take a picture. Please try again.');
       const position = await checkImagePosition(picture.uri);
       const message = position.quality === 'ok'
         ? 'The position looks good. You can take the photo now.'
-        : qualityMessages[position.quality] || position.hint;
+        : position.hint || qualityMessages[position.quality] || 'Adjust the phone position and try again.';
       setPositionMessage(message);
       stopSpeaking();
-      speak(message);
+      speak(message, { onDone: () => { void startListening(); } });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'The position could not be checked. Please try again.';
       setPositionMessage(message);
       stopSpeaking();
-      speak(message);
+      speak(message, { onDone: () => { void startListening(); } });
     } finally {
       setPositionBusy(false);
     }
-  }, [positionBusy, speak, stopSpeaking]);
+  }, [positionBusy, speak, startListening, stopListening, stopSpeaking]);
 
   const chooseFromGallery = useCallback(async () => {
     try {
@@ -278,8 +287,8 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
   }, [stopSpeaking]);
 
   const readAgain = useCallback(() => {
-    if (resultMessage) speak(resultMessage);
-  }, [resultMessage, speak]);
+    if (resultMessage) speak(resultMessage, { onDone: () => { void startListening(); } });
+  }, [resultMessage, speak, startListening]);
 
   useEffect(() => {
     const unregister: Array<() => void> = [];
@@ -330,8 +339,6 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
         <Text accessibilityRole="header" style={{ color: palette.text, fontSize: 30 * scale, lineHeight: 38 * scale, fontWeight: '900' }}>
           {title}
         </Text>
-        <VoiceButton />
-
         {view === 'mode' && (
           <View style={styles.actions}>
             {modeOptions.map((option) => (
