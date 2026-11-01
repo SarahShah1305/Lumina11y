@@ -15,7 +15,7 @@ const model = 'gemini-3.5-flash-lite';
 const maxImageBytes = 4 * 1024 * 1024;
 const modes = ['text', 'describe', 'medicine', 'currency', 'framing'] as const;
 type Mode = typeof modes[number];
-type Quality = 'ok' | 'too_dark' | 'too_bright' | 'too_blurry' | 'too_far' | 'too_close' | 'partly_cut_off';
+type Quality = 'ok' | 'too_dark' | 'too_bright' | 'too_blurry' | 'too_far' | 'too_close' | 'partly_cut_off' | 'wrong_angle';
 type Confidence = 'high' | 'medium' | 'low';
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
@@ -31,9 +31,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function promptFor(mode: Mode): string {
   if (mode === 'framing') {
-    return 'Check only whether the camera position is suitable. Return ONLY valid JSON with exactly two fields: {"quality":"ok"|"too_dark"|"too_bright"|"too_blurry"|"too_far"|"too_close"|"partly_cut_off","hint":string}. The hint must be one short sentence. Use too_dark for dim lighting, too_blurry for blur, too_far when the main subject is small in the frame, and partly_cut_off when any relevant part is outside the frame. Use too_bright or too_close when applicable. Return ok only when the subject is clear, large enough to inspect, well lit, and fully in frame. Do not identify or describe the subject.';
+    return 'Check only whether the camera position is suitable. Return ONLY valid JSON with exactly two fields: {"quality":"ok"|"too_dark"|"too_bright"|"too_blurry"|"too_far"|"too_close"|"partly_cut_off"|"wrong_angle","hint":string}. The hint must be one short, specific sentence telling the user how to improve the view. Use too_dark for dim lighting, too_blurry for blur, too_far when the main subject is small in the frame, partly_cut_off when relevant parts are outside the frame, and wrong_angle when the camera is tilted or viewing the subject from an angle that obscures text or details. For wrong_angle, tell the user to hold the phone straight in front of the object. Use too_bright or too_close when applicable. "ok" is allowed only when the image is clearly lit, sharp, straight-on, and the entire subject fills the frame. If unsure about image quality or angle, return the matching issue instead of ok. Do not identify or describe the subject.';
   }
-  const common = `Return ONLY valid JSON with exactly these fields: {"text":string,"description":string,"quality":"ok"|"too_dark"|"too_bright"|"too_blurry"|"too_far"|"too_close"|"partly_cut_off","confidence":"high"|"medium"|"low","details":object}. No markdown or extra text. Carefully inspect photo quality before reading or describing anything. If lighting is dim, report too_dark. If blurry, report too_blurry. If the subject or text is small/far away, report too_far. If text or the subject is cut off, report partly_cut_off. If too bright or too close, use the matching quality. For ANY quality other than ok, confidence MUST be low and do not guess content. Set quality to ok only if the image is clear, sufficiently lit, close enough, and the relevant subject/text is fully visible. Use empty strings when text or description is not applicable.`;
+  const common = `Return ONLY valid JSON with exactly these fields: {"text":string,"description":string,"quality":"ok"|"too_dark"|"too_bright"|"too_blurry"|"too_far"|"too_close"|"partly_cut_off"|"wrong_angle","confidence":"high"|"medium"|"low","details":object}. No markdown or extra text. Inspect image quality before reading or describing anything. If lighting is dim, report too_dark. If blurry or out of focus, report too_blurry. If the subject or text is small in the frame or far away, report too_far. If text or the subject is cut off, report partly_cut_off. If the camera angle obscures the subject or text, report wrong_angle. If too bright or too close, use the matching quality. For ANY quality other than ok, confidence MUST be low and do not guess content. "ok" is allowed only when the image is clearly lit, sharp, straight-on, and the subject fills the frame with all relevant text or parts fully visible. If uncertain whether any of these requirements is met, return the matching quality issue instead of ok. Use empty strings when text or description is not applicable.`;
   const instructions: Record<Mode, string> = {
     text: 'Read visible text exactly as written. Mark unclear words as [unclear]; never guess. Put the transcription in text, and use details as an empty object.',
     describe: 'Write 1 to 3 short plain sentences for a blind user, covering the scene, main objects, people, colours, and any visible text. Put them in description, and use details as an empty object.',
@@ -49,7 +49,7 @@ function parseModelJson(text: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(cleaned);
     if (!isRecord(parsed)) return null;
-    const qualities: Quality[] = ['ok', 'too_dark', 'too_bright', 'too_blurry', 'too_far', 'too_close', 'partly_cut_off'];
+    const qualities: Quality[] = ['ok', 'too_dark', 'too_bright', 'too_blurry', 'too_far', 'too_close', 'partly_cut_off', 'wrong_angle'];
     const confidences: Confidence[] = ['high', 'medium', 'low'];
     if (typeof parsed.text !== 'string' || typeof parsed.description !== 'string' ||
       !qualities.includes(parsed.quality as Quality) || !confidences.includes(parsed.confidence as Confidence) ||
@@ -65,7 +65,7 @@ function parseFramingJson(text: string): { quality: Quality; hint: string } | nu
   const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   try {
     const parsed: unknown = JSON.parse(cleaned);
-    if (!isRecord(parsed) || !['ok', 'too_dark', 'too_bright', 'too_blurry', 'too_far', 'too_close', 'partly_cut_off'].includes(String(parsed.quality)) ||
+    if (!isRecord(parsed) || !['ok', 'too_dark', 'too_bright', 'too_blurry', 'too_far', 'too_close', 'partly_cut_off', 'wrong_angle'].includes(String(parsed.quality)) ||
       typeof parsed.hint !== 'string' || !parsed.hint.trim()) return null;
     return { quality: parsed.quality as Quality, hint: parsed.hint.trim() };
   } catch {

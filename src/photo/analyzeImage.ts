@@ -2,7 +2,7 @@ import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
 import { supabase } from '../lib/supabase';
 
 export type PhotoMode = 'text' | 'describe' | 'medicine' | 'currency';
-export type PhotoQuality = 'ok' | 'too_dark' | 'too_bright' | 'too_blurry' | 'too_far' | 'too_close' | 'partly_cut_off';
+export type PhotoQuality = 'ok' | 'too_dark' | 'too_bright' | 'too_blurry' | 'too_far' | 'too_close' | 'partly_cut_off' | 'wrong_angle';
 export type PhotoConfidence = 'high' | 'medium' | 'low';
 export type PhotoPosition = { quality: PhotoQuality; hint: string };
 
@@ -15,11 +15,25 @@ export type PhotoAnalysis = {
 };
 
 const timeoutMessage = 'Image analysis took too long. Please check your connection and try again.';
-const qualityValues: PhotoQuality[] = ['ok', 'too_dark', 'too_bright', 'too_blurry', 'too_far', 'too_close', 'partly_cut_off'];
+const positionTimeoutMessage = 'The position check took too long. Please try again shortly.';
+const qualityValues: PhotoQuality[] = ['ok', 'too_dark', 'too_bright', 'too_blurry', 'too_far', 'too_close', 'partly_cut_off', 'wrong_angle'];
 
 function friendlyError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
-  return 'The photo could not be analyzed. Check your internet connection and try again.';
+  return 'The photo service could not be reached. Please try again shortly.';
+}
+
+async function responseErrorMessage(context: unknown): Promise<string | null> {
+  if (!(context instanceof Response)) return null;
+  try {
+    const body: unknown = await context.clone().json();
+    if (typeof body === 'object' && body !== null && 'message' in body && typeof body.message === 'string') {
+      return body.message;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 async function prepareImage(uri: string, width: number, quality: number): Promise<string> {
@@ -42,13 +56,14 @@ async function invokeAnalysis<T>(image: string, mode: string): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     const timeout = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), 30000);
+      timeoutId = setTimeout(() => reject(new Error(mode === 'framing' ? positionTimeoutMessage : timeoutMessage)), 30000);
     });
     const request = supabase.functions.invoke<T>('analyze-image', {
       body: { image, mode },
     });
     const { data, error } = await Promise.race([request, timeout]);
     if (error) {
+      const context = 'context' in error ? error.context : null;
       const status = typeof error.context === 'object' && error.context !== null && 'status' in error.context
         ? Number(error.context.status)
         : 0;
@@ -56,7 +71,15 @@ async function invokeAnalysis<T>(image: string, mode: string): Promise<T> {
       if (status === 413) throw new Error('That photo is too large. Please choose a smaller image.');
       if (status === 429) throw new Error('The service is busy, please try again in a minute.');
       if (status >= 500) throw new Error('The photo service is unavailable right now. Please try again shortly.');
-      throw new Error('The photo could not be analyzed. Check your internet connection and try again.');
+      const message = await responseErrorMessage(context);
+      if (status === 404 || message?.toLowerCase().includes('supported analysis mode')) {
+        throw new Error('The photo service needs its latest update for position checks. Please deploy the analyze-image function and try again.');
+      }
+      if (message) throw new Error(message);
+      if (mode === 'framing') {
+        throw new Error('The position check could not reach the image service. Confirm the latest analyze-image function is deployed, then try again.');
+      }
+      throw new Error('The photo service could not be reached. Please try again shortly.');
     }
     if (!data || typeof data !== 'object') {
       throw new Error('The photo service returned an unclear result. Please try again.');
@@ -64,6 +87,7 @@ async function invokeAnalysis<T>(image: string, mode: string): Promise<T> {
     return data;
   } catch (error) {
     if (error instanceof Error && error.message === timeoutMessage) throw error;
+    if (error instanceof Error && error.message === positionTimeoutMessage) throw error;
     if (error instanceof Error && error.message.startsWith('Please sign in')) throw error;
     if (error instanceof Error && error.message.startsWith('That photo')) throw error;
     if (error instanceof Error && error.message.startsWith('The service is busy')) throw error;
