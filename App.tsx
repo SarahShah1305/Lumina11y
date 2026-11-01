@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   PanResponder,
   Pressable,
@@ -9,13 +9,15 @@ import {
   Text,
   TextInput,
   View,
-  type TextInput as TextInputType,
+  type TextInputInstance,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import type { Session } from '@supabase/supabase-js';
 import { DEFAULT_SETTINGS, SPEECH_RATES, TEXT_SCALES, type ColorTheme, type UserSettings } from './src/types';
-import { loadUserSettings, readLocalSettings, saveUserSettings } from './src/lib/preferences';
+import { hasCompletedSetup, loadUserSettings, markSetupComplete, readLocalSettings, saveUserSettings } from './src/lib/preferences';
 import { isSupabaseConfigured, supabase } from './src/lib/supabase';
+import { PhotoFlow } from './src/photo/PhotoFlow';
+import { normalizeCommand } from './src/voice/commands';
 import {
   APP_NAME,
   APP_WELCOME_SPEECH,
@@ -25,16 +27,29 @@ import {
   useVoice,
 } from './src/voice';
 
-type Screen = 'welcome' | 'accessibility' | 'account' | 'email' | 'codeword' | 'confirm' | 'home';
+type Screen = 'welcome' | 'accessibility' | 'account' | 'email' | 'codeword' | 'confirm' | 'home' | 'photo';
 type AuthMode = 'sign-in' | 'sign-up';
 type SettingsStep = 'text-size' | 'color-theme' | 'voice-speed';
 type PromptHandler = (spokenText: string) => string | null;
+type HomeOption = {
+  id: string;
+  label: string;
+  spokenPhrase: string;
+  commandPhrases: string[];
+  helpSentence: string;
+  secondary: boolean;
+  compact?: boolean;
+  webOnly?: boolean;
+  onPress: () => void;
+  onVoiceCommand?: (matchedPhrase: string) => void;
+};
 
 const settingSteps: SettingsStep[] = ['text-size', 'color-theme', 'voice-speed'];
+
 const registeredSystemPhrases = new Set([
   'next', 'next page', 'back', 'previous page', 'yes', 'no', 'skip',
   'help', 'repeat', 'stop', 'slower', 'faster', 'go back', 'logout',
-  'sign out', 'sign in', 'create account', 'try again',
+  'sign out', 'log out', 'sign in', 'create account', 'try again',
 ]);
 function paletteFor(theme: ColorTheme) {
   if (theme === 'high-contrast') {
@@ -128,7 +143,7 @@ function AppContent() {
   const [heard, setHeard] = useState('');
   const [welcomeText, setWelcomeText] = useState('');
   const [webWelcomeStarted, setWebWelcomeStarted] = useState(Platform.OS !== 'web');
-  const { lastHeard, readHelp, registerCommand, registerShortcut, repeatLastResponse, setSpeechRate, speak, startListening, stopListening, stopSpeaking } = useVoice();
+  const { lastHeard, readHelp, registerCommand, registerShortcut, repeatLastResponse, setHelpHandler, setRepeatHandler, setSpeechRate, speak, startListening, stopListening, stopSpeaking } = useVoice();
 
   const palette = paletteFor(settings.colorTheme);
   const scale = settings.textScale;
@@ -150,8 +165,8 @@ function AppContent() {
   const settingsStepRef = useRef(settingsStep);
   const authFeedback = useRef('');
   const transitionUserId = useRef('');
-  const emailInputRef = useRef<TextInputType>(null);
-  const codewordInputRef = useRef<TextInputType>(null);
+  const emailInputRef = useRef<TextInputInstance>(null);
+  const codewordInputRef = useRef<TextInputInstance>(null);
   const answerYesRef = useRef<() => void>(() => undefined);
   const answerNoRef = useRef<() => void>(() => undefined);
   const retryAuthRef = useRef<() => void>(() => undefined);
@@ -174,6 +189,89 @@ function AppContent() {
   settingsStepRef.current = settingsStep;
   webWelcomeStartedRef.current = webWelcomeStarted;
 
+  const homeOptions = useMemo<HomeOption[]>(() => [
+    {
+      id: 'email', label: 'Read my email address', spokenPhrase: 'read my email address',
+      commandPhrases: ['read my email address', 'read email', 'email address'], helpSentence: 'Read my email address: read the email address for your account.', secondary: true,
+      onPress: () => {
+        const accountEmail = emailRef.current || sessionRef.current?.user.email || '';
+        speak(accountEmail ? `Your email address is ${spellEmail(accountEmail)}.` : 'No email address is available.');
+      },
+      onVoiceCommand: () => {
+        const accountEmail = emailRef.current || sessionRef.current?.user.email || '';
+        speak(accountEmail ? `Your email address is ${spellEmail(accountEmail)}.` : 'No email address is available.');
+      },
+    },
+    {
+      id: 'help', label: 'Help', spokenPhrase: 'help', commandPhrases: ['help'],
+      helpSentence: 'Help: hear what each home option does.', secondary: true, onPress: readHelp,
+      onVoiceCommand: () => readHelp(),
+    },
+    {
+      id: 'repeat', label: 'Repeat', spokenPhrase: 'repeat', commandPhrases: ['repeat'],
+      helpSentence: 'Repeat: hear the whole home menu again.', secondary: true, onPress: repeatLastResponse,
+      onVoiceCommand: () => repeatLastResponse(),
+    },
+    {
+      id: 'stop', label: 'Stop', spokenPhrase: 'stop', commandPhrases: ['stop'],
+      helpSentence: 'Stop: stop speaking and listening.', secondary: true,
+      onPress: () => { stopListening(false); stopSpeaking(); },
+      onVoiceCommand: () => { stopListening(false); stopSpeaking(); },
+    },
+    {
+      id: 'voice', label: 'Tap to speak', spokenPhrase: 'tap to speak or stop listening',
+      commandPhrases: ['tap to speak', 'stop listening'], helpSentence: 'Tap to speak: start listening for a voice command; say stop listening to stop.',
+      secondary: true, onPress: () => { void startListening(); },
+      onVoiceCommand: (phrase) => phrase === 'stop listening' ? stopListening(false) : void startListening(),
+    },
+    {
+      id: 'sign-out', label: 'Sign out', spokenPhrase: 'sign out', commandPhrases: ['sign out', 'log out'],
+      helpSentence: 'Sign out: sign out of your account.', secondary: true, compact: true,
+      onPress: () => {
+        const command = findVoiceCommand('sign out');
+        if (command) void command.command.handler('sign out', command.phrase);
+      },
+      onVoiceCommand: () => {
+        const command = findVoiceCommand('sign out');
+        if (command) void command.command.handler('sign out', command.phrase);
+      },
+    },
+    {
+      id: 'camera', label: 'Read with camera', spokenPhrase: 'read with camera',
+      commandPhrases: ['read with camera', 'open camera', 'camera', 'take a photo', 'read text', 'describe picture', 'read medicine', 'check money'],
+      helpSentence: 'Read with camera: take a photo and I will read the text, describe the picture, read a medicine label, or identify a banknote.',
+      secondary: false, onPress: () => setScreen('photo'), onVoiceCommand: () => setScreen('photo'),
+    },
+  ], [readHelp, repeatLastResponse, setScreen, speak, startListening, stopListening, stopSpeaking]);
+
+  const visibleHomeOptions = useCallback((): HomeOption[] => {
+    return homeOptions.filter((option) => (sessionRef.current || option.id !== 'camera') &&
+      (Platform.OS === 'web' || !option.webOnly));
+  }, [homeOptions]);
+
+  const homeMenuChunks = useCallback((): string[] => {
+    const options = visibleHomeOptions();
+    return [
+      'You are on the home screen. You can say:',
+      ...options.map((option) => `${option.spokenPhrase}.`),
+      'Say help to hear what each option does.',
+    ];
+  }, [visibleHomeOptions]);
+
+  const homeHelpChunks = useCallback((): string[] => {
+    return visibleHomeOptions().map((option) => option.helpSentence);
+  }, [visibleHomeOptions]);
+
+  const speakQueuedChunks = useCallback((chunks: string[], onDone?: () => void): void => {
+    const spokenChunks = chunks.filter((chunk) => chunk.trim());
+    spokenChunks.forEach((chunk, index) => {
+      speak(chunk, {
+        queue: index > 0,
+        onDone: index === spokenChunks.length - 1 ? onDone : undefined,
+      });
+    });
+  }, [speak]);
+
   function setActiveSettings(nextSettings: UserSettings) {
     settingsRef.current = nextSettings;
     setSettings(nextSettings);
@@ -181,21 +279,28 @@ function AppContent() {
   }
 
   async function syncSettings(activeSession: Session) {
+    const setupComplete = await hasCompletedSetup(activeSession.user.id);
     if (activeSession.user.email) {
       emailRef.current = activeSession.user.email;
       setEmail(activeSession.user.email);
     }
     const cached = await readLocalSettings(activeSession.user.id);
     setActiveSettings(cached);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
-      const saved = await loadUserSettings(activeSession.user);
+      const saved = await Promise.race([
+        loadUserSettings(activeSession.user),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('Loading saved settings timed out.')), 5000);
+        }),
+      ]);
       setActiveSettings(saved);
     } catch (error) {
       console.error('Could not load saved accessibility settings.', error);
     } finally {
-      settingsReadyRef.current = true;
-      setSettingsReady(true);
+      if (timeoutId) clearTimeout(timeoutId);
     }
+    return setupComplete;
   }
 
   function enterAuthenticatedSession(activeSession: Session) {
@@ -207,8 +312,11 @@ function AppContent() {
     settingsReadyRef.current = false;
     setSettingsReady(false);
     setTimeout(() => {
-      void syncSettings(activeSession).then(() => {
-        if (sessionRef.current?.user.id === userId) setScreen('accessibility');
+      void syncSettings(activeSession).then((setupComplete) => {
+        if (sessionRef.current?.user.id !== userId) return;
+        settingsReadyRef.current = true;
+        setSettingsReady(true);
+        setScreen(setupComplete ? 'home' : 'accessibility');
       }).catch((error: unknown) => {
         console.error('Could not prepare accessibility settings after sign-in.', error);
         settingsReadyRef.current = true;
@@ -244,7 +352,7 @@ function AppContent() {
     return details ? `${message} Details: ${details}` : message;
   }
 
-  function retryPrompt(prompt: string, token: number, handler: PromptHandler, attempt: number, errorMessage: string) {
+  function retryPrompt(prompt: string | string[], token: number, handler: PromptHandler, attempt: number, errorMessage: string) {
     setMessage(errorMessage);
     if (attempt < 2) {
       speak(errorMessage, { onDone: () => promptAndListen(prompt, token, handler, attempt + 1) });
@@ -254,18 +362,17 @@ function AppContent() {
   }
 
   function promptAndListen(
-    prompt: string,
+    prompt: string | string[],
     token: number,
     handler: PromptHandler,
     attempt = 0,
     sensitive = false,
-    displayPrompt = prompt,
+    displayPrompt?: string,
   ) {
     if (token !== screenToken.current) return;
-    setMessage(displayPrompt);
-    speak(prompt, {
-      rememberLastResponse: !sensitive,
-      onDone: () => {
+    const promptText = Array.isArray(prompt) ? prompt.join(' ') : prompt;
+    setMessage(displayPrompt ?? promptText);
+    const onPromptDone = () => {
         if (token !== screenToken.current) return;
         void startListening((spokenText) => {
           if (token !== screenToken.current) return;
@@ -286,6 +393,14 @@ function AppContent() {
           const match = findVoiceCommand(normalizedSpokenText);
           console.log(`[voice ${new Date().toISOString()}] Command mapped:`, match?.phrase ?? '[no match]');
           if (token !== screenToken.current) return;
+          const homeOption = screenRef.current === 'home'
+            ? homeOptions.find((option) => option.commandPhrases.some((phrase) => normalizeCommand(phrase) === match?.phrase))
+            : undefined;
+          if (match && homeOption && homeOption.onVoiceCommand) {
+            console.log(`[voice ${new Date().toISOString()}] Home option executed:`, match.phrase);
+            homeOption.onVoiceCommand(match.phrase);
+            return;
+          }
           if (match && registeredSystemPhrases.has(match.phrase)) {
             console.log(`[voice ${new Date().toISOString()}] Command executed:`, match.phrase);
             void Promise.resolve(match.command.handler(normalizedSpokenText, match.phrase)).catch((error: unknown) => {
@@ -308,8 +423,9 @@ function AppContent() {
             speak(message);
           }
         });
-      },
-    });
+      };
+    if (Array.isArray(prompt)) speakQueuedChunks(prompt, onPromptDone);
+    else speak(prompt, { rememberLastResponse: !sensitive, onDone: onPromptDone });
   }
 
   function startWelcomeEntry(token: number) {
@@ -317,7 +433,7 @@ function AppContent() {
     speak(APP_WELCOME_SPEECH, {
       onDone: () => {
         if (token !== screenToken.current) return;
-        promptAndListen('Say next to continue.', token, (spokenText) =>
+        promptAndListen('Say next to sign in or create an account. Say help to hear the voice options.', token, (spokenText) =>
           /(?:^|\s)(?:next|continue)(?:\s|$)/i.test(spokenText)
             ? (navigationRef.current.next(), null)
             : 'I did not hear you. Say it again.',
@@ -611,7 +727,7 @@ function AppContent() {
         if (data.session) {
           enterAuthenticatedSession(data.session);
         } else {
-          authFeedback.current = 'Account created. Check your email, then sign in.';
+        authFeedback.current = 'Account created. Please confirm your email, then sign in. Your accessibility setup will follow.';
           codewordRef.current = '';
           setTypedCodeword('');
           setAuthMode('sign-in');
@@ -646,7 +762,17 @@ function AppContent() {
   }
 
   function completeSettingsAndNavigate() {
-    setScreen(sessionRef.current ? 'home' : 'account');
+    const activeSession = sessionRef.current;
+    if (!activeSession) {
+      setScreen('account');
+      return;
+    }
+    void markSetupComplete(activeSession.user.id).then(() => {
+      if (sessionRef.current?.user.id === activeSession.user.id) setScreen('home');
+    }).catch((error: unknown) => {
+      console.error('Could not save accessibility setup completion.', error);
+      if (sessionRef.current?.user.id === activeSession.user.id) setScreen('home');
+    });
   }
 
   function skipCurrentSetting() {
@@ -667,7 +793,7 @@ function AppContent() {
         setWebWelcomeStarted(true);
         startScreenEntry('welcome');
       } else {
-        setScreen('accessibility');
+        setScreen(sessionRef.current ? 'accessibility' : 'account');
       }
     } else if (current === 'accessibility') {
       if (!settingsCompleteRef.current) skipCurrentSetting();
@@ -710,7 +836,7 @@ function AppContent() {
     } else if (current === 'accessibility') {
       setScreen('welcome');
     } else if (current === 'account') {
-      setScreen('accessibility');
+      setScreen('welcome');
     } else if (current === 'email') {
       setScreen('account');
     } else if (current === 'codeword') {
@@ -721,6 +847,8 @@ function AppContent() {
       codewordRef.current = '';
       setTypedCodeword('');
       setScreen('codeword');
+    } else if (current === 'photo') {
+      setScreen('home');
     } else {
       setScreen('accessibility');
     }
@@ -769,8 +897,8 @@ function AppContent() {
       askForCodeword(token, 0);
     } else if (nextScreen === 'confirm') {
       speakConfirmPrompt(token);
-    } else {
-      promptAndListen('Home. Say voice help, repeat, stop, or sign out.', token, (spokenText) => {
+    } else if (nextScreen === 'home') {
+      promptAndListen(homeMenuChunks(), token, (spokenText) => {
         if (/\b(sign out|log out|logout)\b/i.test(spokenText)) return null;
         return 'I did not hear you. Say it again.';
       });
@@ -780,7 +908,7 @@ function AppContent() {
   useEffect(() => {
     const unregister = [
       registerCommand(['next', 'next page'], () => navigationRef.current.next(), 'Go to the next screen'),
-      registerCommand(['back', 'previous page'], () => navigationRef.current.back(), 'Go back to the previous screen'),
+      registerCommand('previous page', () => navigationRef.current.back(), 'Go back to the previous screen'),
       registerCommand('yes', () => answerYesRef.current(), 'Confirm the current choice'),
       registerCommand('no', () => answerNoRef.current(), 'Reject the current choice'),
       registerCommand('skip', () => navigationRef.current.skip(), 'Keep the current setting and continue'),
@@ -799,7 +927,13 @@ function AppContent() {
           speak('Signed out.');
         }
       }, 'Sign out of your account'),
-      registerCommand('try again', () => retryAuthRef.current(), 'Try entering the code word again'),
+      registerCommand('try again', () => {
+        if (screenRef.current === 'photo') {
+          const retryPhotoCommand = findVoiceCommand('retry photo');
+          if (retryPhotoCommand) return retryPhotoCommand.command.handler('retry photo', retryPhotoCommand.phrase);
+        }
+        retryAuthRef.current();
+      }, 'Try again'),
     ];
     const removeBackShortcut = registerShortcut('Alt+B', 'Go back to the previous screen', () => navigationRef.current.back());
     return () => {
@@ -807,6 +941,29 @@ function AppContent() {
       removeBackShortcut();
     };
   }, [registerCommand, registerShortcut, speak]);
+
+  useEffect(() => {
+    if (screen !== 'home' || !session) return;
+    const removeHelpHandler = setHelpHandler(() => speakQueuedChunks(homeHelpChunks()));
+    const removeRepeatHandler = setRepeatHandler(() => speakQueuedChunks(homeMenuChunks()));
+    const unregister: Array<() => void> = [];
+    homeOptions.forEach((option) => {
+      if (!option.onVoiceCommand || (option.webOnly && Platform.OS !== 'web')) return;
+      const phrases = option.commandPhrases.filter((phrase) => !registeredSystemPhrases.has(normalizeCommand(phrase)));
+      if (phrases.length) {
+        unregister.push(registerCommand(
+          phrases,
+          (_spokenText, matchedPhrase) => option.onVoiceCommand?.(matchedPhrase),
+          option.helpSentence,
+        ));
+      }
+    });
+    return () => {
+      unregister.forEach((remove) => remove());
+      removeHelpHandler();
+      removeRepeatHandler();
+    };
+  }, [homeHelpChunks, homeMenuChunks, homeOptions, registerCommand, screen, session, setHelpHandler, setRepeatHandler, speakQueuedChunks]);
 
   useEffect(() => {
     const current = screen;
@@ -849,31 +1006,35 @@ function AppContent() {
       const restoredSession = data.session;
       sessionRef.current = restoredSession;
       setSession(restoredSession);
+      let initialScreen: Screen = 'welcome';
       if (restoredSession) {
         settingsReadyRef.current = false;
         setSettingsReady(false);
         try {
-          await syncSettings(restoredSession);
+          const setupComplete = await syncSettings(restoredSession);
+          initialScreen = setupComplete ? 'home' : 'accessibility';
         } catch (settingsError) {
           console.error('Could not load accessibility settings.', settingsError);
-          settingsReadyRef.current = true;
-          setSettingsReady(true);
+          initialScreen = 'accessibility';
         }
-      } else {
-        settingsReadyRef.current = true;
-        setSettingsReady(true);
       }
+      screenRef.current = initialScreen;
+      setScreen(initialScreen);
+      settingsReadyRef.current = true;
+      setSettingsReady(true);
       sessionReadyRef.current = true;
       setSessionReady(true);
-      startScreenEntry(screenRef.current);
+      startScreenEntry(initialScreen);
     }).catch((error: unknown) => {
       if (!mounted) return;
       console.error('Could not initialize the account session.', error);
       sessionReadyRef.current = true;
       settingsReadyRef.current = true;
+      screenRef.current = 'welcome';
+      setScreen('welcome');
       setSessionReady(true);
       setSettingsReady(true);
-      startScreenEntry(screenRef.current);
+      startScreenEntry('welcome');
     });
     return () => {
       mounted = false;
@@ -1012,10 +1173,24 @@ function AppContent() {
 
   const contentStyles = makeScreenStyles(palette, scale);
 
+  if (!sessionReady || (session && !settingsReady)) {
+    return (
+      <SafeAreaView style={{ flex: 1, alignItems: 'center', backgroundColor: palette.background, justifyContent: 'center', padding: 24 }}>
+        <Text accessibilityRole="header" style={{ color: palette.text, fontSize: 24 * scale, fontWeight: '800', textAlign: 'center' }}>
+          Loading your saved settings…
+        </Text>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: palette.background }}>
       <StatusBar style={settings.colorTheme === 'light' ? 'dark' : 'light'} />
       <View style={contentStyles.frame} {...panResponderRef.current.panHandlers}>
+        {screen === 'photo' && session ? (
+          <PhotoFlow palette={palette} scale={scale} onBack={() => setScreen('home')} />
+        ) : (
+          <>
         <View style={contentStyles.navigation}>
           <AppButton label="Back" onPress={() => navigationRef.current.back()} palette={palette} scale={scale} secondary compact />
           <AppButton label="Next" onPress={() => navigationRef.current.next()} palette={palette} scale={scale} compact disabled={busy} />
@@ -1147,36 +1322,22 @@ function AppContent() {
               <Text accessibilityLabel="Account email address" style={contentStyles.message}>
                 Email: {email || session?.user.email || 'No email address available'}
               </Text>
-              <AppButton
-                label="Read email address"
-                onPress={() => {
-                  const accountEmail = email || session?.user.email || '';
-                  speak(accountEmail
-                    ? `Your email address is ${spellEmail(accountEmail)}.`
-                    : 'No email address is available.');
-                }}
-                palette={palette}
-                scale={scale}
-                secondary
-              />
-              <AppButton label="Voice help" onPress={readHelp} palette={palette} scale={scale} secondary />
-              <AppButton label="Repeat" onPress={repeatLastResponse} palette={palette} scale={scale} secondary />
-              <AppButton label="Stop" onPress={() => { stopListening(false); stopSpeaking(); }} palette={palette} scale={scale} secondary />
-              {Platform.OS === 'web' && <VoiceButton />}
-              <AppButton
-                label="Sign out"
-                onPress={() => {
-                  const command = findVoiceCommand('sign out');
-                  if (command) void command.command.handler('sign out', command.phrase);
-                }}
-                palette={palette}
-                scale={scale}
-                secondary
-                compact
-              />
+              {visibleHomeOptions().map((option) => option.id === 'voice'
+                ? <VoiceButton key={option.id} />
+                : <AppButton
+                    key={option.id}
+                    label={option.label}
+                    onPress={option.onPress}
+                    palette={palette}
+                    scale={scale}
+                    secondary={option.secondary}
+                    compact={'compact' in option && option.compact}
+                  />)}
             </View>
           )}
         </ScrollView>
+          </>
+        )}
       </View>
     </SafeAreaView>
   );

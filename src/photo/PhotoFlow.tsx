@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CameraView, useCameraPermissions, type CameraCapturedPicture } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { useVoice } from '../voice';
-import { analyzeImage, type PhotoAnalysis, type PhotoMode, type PhotoQuality } from './analyzeImage';
+import { useVoice, VoiceButton } from '../voice';
+import { analyzeImage, checkImagePosition, type PhotoAnalysis, type PhotoMode, type PhotoQuality } from './analyzeImage';
 
 type Palette = {
   background: string;
@@ -137,26 +137,44 @@ function resultSpeech(mode: PhotoMode, result: PhotoAnalysis): string {
 }
 
 export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
-  const { speak, stopSpeaking } = useVoice();
+  const { speak, stopSpeaking, startListening, stopListening, registerCommand } = useVoice();
   const [view, setView] = useState<ViewName>('mode');
   const [mode, setMode] = useState<PhotoMode>('text');
   const [result, setResult] = useState<PhotoAnalysis | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
+  const [positionMessage, setPositionMessage] = useState('');
+  const [positionBusy, setPositionBusy] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
   const resultMessage = useMemo(() => result ? resultSpeech(mode, result) : '', [mode, result]);
-  const qualityMessage = result ? qualityMessages[result.quality] : undefined;
+  const qualityMessage = result && result.quality !== 'ok'
+    ? qualityMessages[result.quality] || 'The photo needs adjusting. Please try again.'
+    : undefined;
 
-  useEffect(() => {
-    speak('Choose what you want to do with the camera.');
-    return () => stopSpeaking();
-  }, [speak, stopSpeaking]);
-
-  useEffect(() => {
-    if (view === 'camera' && permission && !permission.granted) {
-      speak('Camera permission is needed. Allow camera access to take a photo, or choose one from your gallery.');
+  const spokenViewPrompt = useMemo(() => {
+    const modeCommands = 'read text, describe picture, read medicine, or check money';
+    if (view === 'mode') return `Photo helper. You can say ${modeCommands}, or go back.`;
+    if (view === 'camera') {
+      if (!permission) return '';
+      if (!permission.granted) return 'Camera permission is needed. You can allow access, choose from gallery, or say go back.';
+      return 'The camera is ready. Hold the phone about 30 centimetres from the object, make sure there is good light, and keep it steady. Say take photo, check position, take another photo, or one of the photo modes: read text, describe picture, read medicine, or check money. Say go back to return to the photo menu.';
     }
-  }, [permission, speak, view]);
+    if (view === 'loading') return 'Reading your photo, please wait. Say stop to stop speaking, or go back to return home.';
+    if (result && result.quality !== 'ok') {
+      return `${qualityMessage || 'The photo needs adjusting. Please try again.'} Say try again or go back.`;
+    }
+    return `${resultMessage} You can say read again, stop, take another photo, try again, ${modeCommands}, or go back.`;
+  }, [permission, qualityMessage, result, resultMessage, view]);
+
+  useEffect(() => {
+    if (!spokenViewPrompt) return;
+    speak(spokenViewPrompt, { onDone: () => { void startListening(); } });
+  }, [speak, spokenViewPrompt, startListening]);
+
+  useEffect(() => () => {
+    stopListening(false);
+    stopSpeaking();
+  }, [stopListening, stopSpeaking]);
 
   const analyzePhoto = useCallback(async (uri: string, selectedMode = mode) => {
     stopSpeaking();
@@ -178,20 +196,15 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
     }
   }, [mode, speak, stopSpeaking]);
 
-  useEffect(() => {
-    if (view !== 'result' || !result) return;
-    stopSpeaking();
-    speak(qualityMessage || resultMessage);
-  }, [qualityMessage, result, resultMessage, speak, stopSpeaking, view]);
-
-  const selectMode = (selectedMode: PhotoMode) => {
+  const selectMode = useCallback((selectedMode: PhotoMode) => {
     stopSpeaking();
     setMode(selectedMode);
     setErrorMessage('');
+    setPositionMessage('');
     setView('camera');
-  };
+  }, [stopSpeaking]);
 
-  const takePhoto = async () => {
+  const takePhoto = useCallback(async () => {
     if (!cameraRef.current) return;
     try {
       const picture: CameraCapturedPicture | undefined = await cameraRef.current.takePictureAsync({ quality: 0.8 });
@@ -201,9 +214,36 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
       setErrorMessage(message);
       speak(message);
     }
-  };
+  }, [analyzePhoto, speak]);
 
-  const chooseFromGallery = async () => {
+  const checkPosition = useCallback(async () => {
+    if (!cameraRef.current || positionBusy) return;
+    setPositionBusy(true);
+    setErrorMessage('');
+    setPositionMessage('Checking the camera position.');
+    stopSpeaking();
+    speak('Checking the camera position.');
+    try {
+      const picture = await cameraRef.current.takePictureAsync({ quality: 0.35, skipProcessing: true });
+      if (!picture?.uri) throw new Error('The camera could not take a picture. Please try again.');
+      const position = await checkImagePosition(picture.uri);
+      const message = position.quality === 'ok'
+        ? 'The position looks good. You can take the photo now.'
+        : qualityMessages[position.quality] || position.hint;
+      setPositionMessage(message);
+      stopSpeaking();
+      speak(message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The position could not be checked. Please try again.';
+      setPositionMessage(message);
+      stopSpeaking();
+      speak(message);
+    } finally {
+      setPositionBusy(false);
+    }
+  }, [positionBusy, speak, stopSpeaking]);
+
+  const chooseFromGallery = useCallback(async () => {
     try {
       const choice = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
@@ -216,12 +256,60 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
       setErrorMessage(message);
       speak(message);
     }
-  };
+  }, [analyzePhoto, speak]);
 
-  const goBack = () => {
+  const goBack = useCallback(() => {
     stopSpeaking();
     onBack();
-  };
+  }, [onBack, stopSpeaking]);
+
+  const takeAnotherPhoto = useCallback(() => {
+    stopSpeaking();
+    setErrorMessage('');
+    setPositionMessage('');
+    setView('camera');
+  }, [stopSpeaking]);
+
+  const tryAgain = useCallback(() => {
+    stopSpeaking();
+    setErrorMessage('');
+    setPositionMessage('');
+    setView('camera');
+  }, [stopSpeaking]);
+
+  const readAgain = useCallback(() => {
+    if (resultMessage) speak(resultMessage);
+  }, [resultMessage, speak]);
+
+  useEffect(() => {
+    const unregister: Array<() => void> = [];
+    if (view !== 'loading') {
+      modeOptions.forEach((option) => {
+        const phrases = option.mode === 'text' ? ['read text', 'text mode']
+          : option.mode === 'describe' ? ['describe picture', 'describe image']
+            : option.mode === 'medicine' ? ['read medicine', 'medicine label']
+              : ['check money', 'currency note'];
+        unregister.push(registerCommand(phrases, () => selectMode(option.mode), `Choose ${option.label.toLowerCase()} mode`));
+      });
+    }
+
+    if (view === 'camera' && permission?.granted) {
+      unregister.push(registerCommand(['take photo', 'take a photo'], () => { void takePhoto(); }, 'Take a photo'));
+      unregister.push(registerCommand('take another photo', takeAnotherPhoto, 'Take another photo'));
+      unregister.push(registerCommand('check position', () => { void checkPosition(); }, 'Check the camera position'));
+      unregister.push(registerCommand(['choose from gallery', 'open gallery'], () => { void chooseFromGallery(); }, 'Choose a photo from the gallery'));
+    }
+    if (view === 'camera' && !permission?.granted) {
+      unregister.push(registerCommand(['choose from gallery', 'open gallery'], () => { void chooseFromGallery(); }, 'Choose a photo from the gallery'));
+    }
+    if (view === 'result') {
+      unregister.push(registerCommand('read again', readAgain, 'Read the photo result again'));
+      unregister.push(registerCommand('take another photo', takeAnotherPhoto, 'Take another photo'));
+      unregister.push(registerCommand('retry photo', tryAgain, 'Try the photo again'));
+    }
+
+    return () => unregister.forEach((remove) => remove());
+  }, [checkPosition, chooseFromGallery, permission?.granted, readAgain, registerCommand, selectMode, takeAnotherPhoto, tryAgain, view]);
 
   const openSettings = async () => {
     try {
@@ -242,6 +330,7 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
         <Text accessibilityRole="header" style={{ color: palette.text, fontSize: 30 * scale, lineHeight: 38 * scale, fontWeight: '900' }}>
           {title}
         </Text>
+        <VoiceButton />
 
         {view === 'mode' && (
           <View style={styles.actions}>
@@ -255,6 +344,7 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
         {view === 'camera' && (
           <View style={styles.actions}>
             {errorMessage ? <Text accessibilityLiveRegion="polite" style={{ color: palette.text, fontSize: 20 * scale, lineHeight: 28 * scale }}>{errorMessage}</Text> : null}
+            {positionMessage ? <Text accessibilityLiveRegion="polite" style={{ color: palette.text, fontSize: 20 * scale, lineHeight: 28 * scale }}>{positionMessage}</Text> : null}
             {!permission?.granted ? (
               <>
                 <Text style={{ color: palette.text, fontSize: 20 * scale, lineHeight: 28 * scale }}>
@@ -267,6 +357,7 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
               <CameraView ref={cameraRef} style={styles.camera} facing="back" />
             )}
             {permission?.granted && <PhotoButton label="Take photo" onPress={() => { void takePhoto(); }} palette={palette} scale={scale} large />}
+            {permission?.granted && <PhotoButton label={positionBusy ? 'Checking position…' : 'Check position'} onPress={() => { void checkPosition(); }} palette={palette} scale={scale} secondary large />}
             <PhotoButton label="Choose from gallery" onPress={() => { void chooseFromGallery(); }} palette={palette} scale={scale} secondary />
             <PhotoButton label="Back" onPress={() => { stopSpeaking(); setErrorMessage(''); setView('mode'); }} palette={palette} scale={scale} secondary />
           </View>
@@ -280,10 +371,10 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
 
         {view === 'result' && result && (
           <View style={styles.actions}>
-            {qualityMessage ? (
+            {result.quality !== 'ok' ? (
               <>
                 <Text accessibilityLiveRegion="polite" style={{ color: palette.text, fontSize: 22 * scale, lineHeight: 32 * scale, fontWeight: '700' }}>{qualityMessage}</Text>
-                <PhotoButton label="Try again" onPress={() => { stopSpeaking(); setView('camera'); }} palette={palette} scale={scale} large />
+                <PhotoButton label="Try again" onPress={tryAgain} palette={palette} scale={scale} large />
               </>
             ) : (
               <>
@@ -306,9 +397,9 @@ export function PhotoFlow({ palette, scale, onBack }: PhotoFlowProps) {
                   </View>
                 )}
                 {mode === 'currency' && <Text style={{ color: palette.text, fontSize: 19 * scale, lineHeight: 27 * scale }}>{detailText(result.details.denomination)} {detailText(result.details.currency)} · {detailText(result.details.side)}</Text>}
-                <PhotoButton label="Read again" onPress={() => speak(resultMessage)} palette={palette} scale={scale} secondary />
+                <PhotoButton label="Read again" onPress={readAgain} palette={palette} scale={scale} secondary />
                 <PhotoButton label="Stop reading" onPress={stopSpeaking} palette={palette} scale={scale} secondary />
-                <PhotoButton label="Take another photo" onPress={() => { stopSpeaking(); setErrorMessage(''); setView('camera'); }} palette={palette} scale={scale} large />
+                <PhotoButton label="Take another photo" onPress={takeAnotherPhoto} palette={palette} scale={scale} large />
               </>
             )}
             <PhotoButton label="Back" onPress={goBack} palette={palette} scale={scale} secondary />

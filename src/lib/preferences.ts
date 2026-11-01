@@ -4,6 +4,19 @@ import { DEFAULT_SETTINGS, type ColorTheme, type UserSettings } from '../types';
 import { supabase } from './supabase';
 
 const settingsStorageKey = (userId: string) => `lumina11y.settings.${userId}`;
+const setupCompleteStorageKey = (userId: string) => `lumina11y.setupComplete.${userId}`;
+
+export async function hasCompletedSetup(userId: string): Promise<boolean> {
+  try {
+    return (await AsyncStorage.getItem(setupCompleteStorageKey(userId))) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+export async function markSetupComplete(userId: string): Promise<void> {
+  await AsyncStorage.setItem(setupCompleteStorageKey(userId), 'true');
+}
 
 function isColorTheme(value: unknown): value is ColorTheme {
   return value === 'light' || value === 'high-contrast' || value === 'dark';

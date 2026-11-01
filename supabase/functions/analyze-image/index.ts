@@ -13,7 +13,7 @@ const corsHeaders = {
 
 const model = 'gemini-3.5-flash-lite';
 const maxImageBytes = 4 * 1024 * 1024;
-const modes = ['text', 'describe', 'medicine', 'currency'] as const;
+const modes = ['text', 'describe', 'medicine', 'currency', 'framing'] as const;
 type Mode = typeof modes[number];
 type Quality = 'ok' | 'too_dark' | 'too_bright' | 'too_blurry' | 'too_far' | 'too_close' | 'partly_cut_off';
 type Confidence = 'high' | 'medium' | 'low';
@@ -30,12 +30,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function promptFor(mode: Mode): string {
-  const common = `Return ONLY valid JSON with exactly these fields: {"text":string,"description":string,"quality":"ok"|"too_dark"|"too_bright"|"too_blurry"|"too_far"|"too_close"|"partly_cut_off","confidence":"high"|"medium"|"low","details":object}. No markdown or extra text. Assess image quality. If it is too dark, too blurry, too far, or partly cut off, report the matching quality and set confidence to low; do not guess. Use empty strings when text or description is not applicable. Set quality to "ok" when none of the listed issues applies.`;
+  if (mode === 'framing') {
+    return 'Check only whether the camera position is suitable. Return ONLY valid JSON with exactly two fields: {"quality":"ok"|"too_dark"|"too_bright"|"too_blurry"|"too_far"|"too_close"|"partly_cut_off","hint":string}. The hint must be one short sentence. Use too_dark for dim lighting, too_blurry for blur, too_far when the main subject is small in the frame, and partly_cut_off when any relevant part is outside the frame. Use too_bright or too_close when applicable. Return ok only when the subject is clear, large enough to inspect, well lit, and fully in frame. Do not identify or describe the subject.';
+  }
+  const common = `Return ONLY valid JSON with exactly these fields: {"text":string,"description":string,"quality":"ok"|"too_dark"|"too_bright"|"too_blurry"|"too_far"|"too_close"|"partly_cut_off","confidence":"high"|"medium"|"low","details":object}. No markdown or extra text. Carefully inspect photo quality before reading or describing anything. If lighting is dim, report too_dark. If blurry, report too_blurry. If the subject or text is small/far away, report too_far. If text or the subject is cut off, report partly_cut_off. If too bright or too close, use the matching quality. For ANY quality other than ok, confidence MUST be low and do not guess content. Set quality to ok only if the image is clear, sufficiently lit, close enough, and the relevant subject/text is fully visible. Use empty strings when text or description is not applicable.`;
   const instructions: Record<Mode, string> = {
     text: 'Read visible text exactly as written. Mark unclear words as [unclear]; never guess. Put the transcription in text, and use details as an empty object.',
     describe: 'Write 1 to 3 short plain sentences for a blind user, covering the scene, main objects, people, colours, and any visible text. Put them in description, and use details as an empty object.',
     medicine: 'Copy only printed information from medicine packaging. Set details to {"name":string,"strength":string,"form":string,"expiry":string,"instructionsOnLabel":string,"warningsOnLabel":string}. Leave unknown or unreadable values empty. Never invent information or advise doses.',
     currency: 'Identify Pakistani rupee notes only: 10, 20, 50, 100, 500, 1000, or 5000. Set details to {"currency":string,"denomination":number|string,"side":string}. If unsure, set confidence to low and do not guess; leave currency and denomination empty. Side may be front, back, or unknown.',
+    framing: '',
   };
   return `${common} ${instructions[mode]}`;
 }
@@ -50,11 +54,20 @@ function parseModelJson(text: string): Record<string, unknown> | null {
     if (typeof parsed.text !== 'string' || typeof parsed.description !== 'string' ||
       !qualities.includes(parsed.quality as Quality) || !confidences.includes(parsed.confidence as Confidence) ||
       !isRecord(parsed.details)) return null;
-    if (parsed.quality === 'too_dark' || parsed.quality === 'too_blurry' ||
-      parsed.quality === 'too_far' || parsed.quality === 'partly_cut_off') {
-      parsed.confidence = 'low';
-    }
+    if (parsed.quality !== 'ok') parsed.confidence = 'low';
     return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function parseFramingJson(text: string): { quality: Quality; hint: string } | null {
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  try {
+    const parsed: unknown = JSON.parse(cleaned);
+    if (!isRecord(parsed) || !['ok', 'too_dark', 'too_bright', 'too_blurry', 'too_far', 'too_close', 'partly_cut_off'].includes(String(parsed.quality)) ||
+      typeof parsed.hint !== 'string' || !parsed.hint.trim()) return null;
+    return { quality: parsed.quality as Quality, hint: parsed.hint.trim() };
   } catch {
     return null;
   }
@@ -114,7 +127,7 @@ runtime.Deno.serve(async (request) => {
           headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
           body: JSON.stringify({
             contents: [{ parts: [{ text: promptFor(body.mode as Mode) }, { inline_data: { mime_type: 'image/jpeg', data: image } }] }],
-            generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: 500 },
+            generationConfig: { temperature: 0, responseMimeType: 'application/json', maxOutputTokens: body.mode === 'framing' ? 120 : 500 },
           }),
           signal: AbortSignal.timeout(30000),
         },
@@ -147,6 +160,11 @@ runtime.Deno.serve(async (request) => {
     const content = isRecord(candidate) && isRecord(candidate.content) ? candidate.content : null;
     const parts = content && Array.isArray(content.parts) ? content.parts : [];
     const reply = parts.filter((part) => isRecord(part) && typeof part.text === 'string').map((part) => (part as { text: string }).text).join('\n');
+    if (body.mode === 'framing') {
+      const framing = parseFramingJson(reply);
+      if (!framing) return jsonResponse({ error: 'invalid_analysis_output', message: 'The image service returned an unclear position check. Please try again.' }, 502);
+      return jsonResponse(framing);
+    }
     const result = parseModelJson(reply);
     if (!result) return jsonResponse({ error: 'invalid_analysis_output', message: 'The image service returned an unclear result. Please try again.' }, 502);
     return jsonResponse(result);
