@@ -22,7 +22,7 @@ import {
   APP_NAME,
   APP_WELCOME_SPEECH,
   findVoiceCommand,
-  VoiceButton,
+  isSpeaking,
   VoiceProvider,
   useVoice,
 } from './src/voice';
@@ -41,7 +41,7 @@ type HomeOption = {
   compact?: boolean;
   webOnly?: boolean;
   onPress: () => void;
-  onVoiceCommand?: (matchedPhrase: string) => void;
+  onVoiceCommand?: (matchedPhrase: string) => void | Promise<void>;
 };
 
 const settingSteps: SettingsStep[] = ['text-size', 'color-theme', 'voice-speed'];
@@ -219,12 +219,6 @@ function AppContent() {
       onVoiceCommand: () => { stopListening(false); stopSpeaking(); },
     },
     {
-      id: 'voice', label: 'Tap to speak', spokenPhrase: 'tap to speak or stop listening',
-      commandPhrases: ['tap to speak', 'stop listening'], helpSentence: 'Tap to speak: start listening for a voice command; say stop listening to stop.',
-      secondary: true, onPress: () => { void startListening(); },
-      onVoiceCommand: (phrase) => phrase === 'stop listening' ? stopListening(false) : void startListening(),
-    },
-    {
       id: 'sign-out', label: 'Sign out', spokenPhrase: 'sign out', commandPhrases: ['sign out', 'log out'],
       helpSentence: 'Sign out: sign out of your account.', secondary: true, compact: true,
       onPress: () => {
@@ -233,7 +227,7 @@ function AppContent() {
       },
       onVoiceCommand: () => {
         const command = findVoiceCommand('sign out');
-        if (command) void command.command.handler('sign out', command.phrase);
+        if (command) return command.command.handler('sign out', command.phrase);
       },
     },
     {
@@ -242,7 +236,7 @@ function AppContent() {
       helpSentence: 'Read with camera: take a photo and I will read the text, describe the picture, read a medicine label, or identify a banknote.',
       secondary: false, onPress: () => setScreen('photo'), onVoiceCommand: () => setScreen('photo'),
     },
-  ], [readHelp, repeatLastResponse, setScreen, speak, startListening, stopListening, stopSpeaking]);
+  ], [readHelp, repeatLastResponse, setScreen, speak, stopListening, stopSpeaking]);
 
   const visibleHomeOptions = useCallback((): HomeOption[] => {
     return homeOptions.filter((option) => (sessionRef.current || option.id !== 'camera') &&
@@ -352,6 +346,18 @@ function AppContent() {
     return details ? `${message} Details: ${details}` : message;
   }
 
+  function listenForNextHomeOption(token: number) {
+    const startWhenSpeechEnds = () => {
+      if (token !== screenToken.current || screenRef.current !== 'home' || !sessionRef.current) return;
+      if (isSpeaking()) {
+        setTimeout(startWhenSpeechEnds, 120);
+        return;
+      }
+      void startListening();
+    };
+    setTimeout(startWhenSpeechEnds, 0);
+  }
+
   function retryPrompt(prompt: string | string[], token: number, handler: PromptHandler, attempt: number, errorMessage: string) {
     setMessage(errorMessage);
     if (attempt < 2) {
@@ -398,7 +404,14 @@ function AppContent() {
             : undefined;
           if (match && homeOption && homeOption.onVoiceCommand) {
             console.log(`[voice ${new Date().toISOString()}] Home option executed:`, match.phrase);
-            homeOption.onVoiceCommand(match.phrase);
+            void Promise.resolve(homeOption.onVoiceCommand(match.phrase)).then(() => {
+              if (homeOption.id !== 'stop' && homeOption.id !== 'camera') {
+                listenForNextHomeOption(token);
+              }
+            }).catch((error: unknown) => {
+              console.error('Home voice option could not be completed.', error);
+              speak('I could not complete that option. Please try again.');
+            });
             return;
           }
           if (match && registeredSystemPhrases.has(match.phrase)) {
@@ -1322,17 +1335,17 @@ function AppContent() {
               <Text accessibilityLabel="Account email address" style={contentStyles.message}>
                 Email: {email || session?.user.email || 'No email address available'}
               </Text>
-              {visibleHomeOptions().map((option) => option.id === 'voice'
-                ? <VoiceButton key={option.id} />
-                : <AppButton
-                    key={option.id}
-                    label={option.label}
-                    onPress={option.onPress}
-                    palette={palette}
-                    scale={scale}
-                    secondary={option.secondary}
-                    compact={'compact' in option && option.compact}
-                  />)}
+              {visibleHomeOptions().map((option) => (
+                <AppButton
+                  key={option.id}
+                  label={option.label}
+                  onPress={option.onPress}
+                  palette={palette}
+                  scale={scale}
+                  secondary={option.secondary}
+                  compact={'compact' in option && option.compact}
+                />
+              ))}
             </View>
           )}
         </ScrollView>
