@@ -26,7 +26,9 @@ type VoiceContextValue = {
   ) => Promise<void>;
   stopListening: (announce?: boolean) => void;
   repeatLastResponse: () => void;
+  setRepeatHandler: (handler: (() => void) | null) => () => void;
   readHelp: () => void;
+  setHelpHandler: (handler: (() => void) | null) => () => void;
   registerCommand: (phrases: string | string[], handler: CommandHandler, description?: string) => () => void;
   registerShortcut: (keyCombo: string, label: string, handler: () => void | Promise<void>) => () => void;
   setSpeechRate: (rate: number) => void;
@@ -50,6 +52,8 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
   const [speechRate, setSpeechRateState] = useState(getDefaultSpeechRate);
   const [shortcuts, setShortcuts] = useState(getVoiceShortcuts);
   const lastResponse = useRef('');
+  const repeatHandler = useRef<(() => void) | null>(null);
+  const helpHandler = useRef<(() => void) | null>(null);
   const actionHandlers = useRef({ onGoBack, onLogout });
   actionHandlers.current = { onGoBack, onLogout };
 
@@ -64,9 +68,20 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
   }, []);
 
   const repeatLastResponse = useCallback(() => {
+    if (repeatHandler.current) {
+      repeatHandler.current();
+      return;
+    }
     if (lastResponse.current) speak(lastResponse.current);
     else speak('There is no response to repeat yet.');
   }, [speak]);
+
+  const setRepeatHandler = useCallback((handler: (() => void) | null) => {
+    repeatHandler.current = handler;
+    return () => {
+      if (repeatHandler.current === handler) repeatHandler.current = null;
+    };
+  }, []);
 
   const setSpeechRate = useCallback((rate: number) => {
     setDefaultSpeechRate(rate);
@@ -74,6 +89,10 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
   }, []);
 
   const readHelp = useCallback(() => {
+    if (helpHandler.current) {
+      helpHandler.current();
+      return;
+    }
     const commands = getVoiceCommands();
     const currentShortcuts = getVoiceShortcuts();
     const lines = [
@@ -88,6 +107,13 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
     const helpRate = Math.min(getDefaultSpeechRate(), 0.85);
     lines.forEach((line, index) => speak(line, { queue: index > 0, rate: helpRate }));
   }, [speak]);
+
+  const setHelpHandler = useCallback((handler: (() => void) | null) => {
+    helpHandler.current = handler;
+    return () => {
+      if (helpHandler.current === handler) helpHandler.current = null;
+    };
+  }, []);
 
   const startListening = useCallback(async (
     onResult?: (text: string) => void,
@@ -135,7 +161,7 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
       registerCommand('go back', async () => {
         if (actionHandlers.current.onGoBack) await actionHandlers.current.onGoBack();
         else {
-          const backCommand = findVoiceCommand('back');
+          const backCommand = findVoiceCommand('previous page');
           if (backCommand) await backCommand.command.handler('back', backCommand.phrase);
           else speak('Go back is not connected on this screen.');
         }
@@ -208,7 +234,9 @@ export function VoiceProvider({ children, onGoBack, onLogout }: VoiceProviderPro
     startListening,
     stopListening,
     repeatLastResponse,
+    setRepeatHandler,
     readHelp,
+    setHelpHandler,
     registerCommand,
     registerShortcut,
     setSpeechRate,
